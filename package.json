@@ -1,0 +1,23 @@
+{
+  "name": "minimal-swe-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A minimal SWE Agent implemented in TypeScript",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "tsc -p tsconfig.test.json && node scripts/run-tests.mjs all",
+    "test:unit": "tsc -p tsconfig.test.json && node scripts/run-tests.mjs unit",
+    "test:integration": "tsc -p tsconfig.test.json && node scripts/run-tests.mjs integration",
+    "check": "npm run typecheck && npm run test && npm run build",
+    "smoke": "node dist/index.js \"请查看当前目录结构，然后给出最终结论\"",
+    "start": "tsx src/index.ts",
+    "demo": "tsx src/index.ts \"请查看当前目录结构，然后给出最终结论\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

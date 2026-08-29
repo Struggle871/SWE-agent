@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.swe-agent/
+coverage/
+.test-dist/
+tmp/
+*.log
+.npm-cache/
+--json
+.workbuddy/

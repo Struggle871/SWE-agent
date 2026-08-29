@@ -1,0 +1,108 @@
+Phase 1 已完成并验证通过。以下是实现总结。
+实现了什么（对应文档 Phase 1 两块）
+① 双层循环 + 事件流 + 流式工具预执行（4.1）
+文件
+作用
+src/core/agent-session.ts
+会话生命周期外层：任务规划、步数预算、结果提取、事件分发（对齐 QueryEngine / Session）
+src/core/turn.ts
+单轮循环内层：生成→解析（含重试）→执行工具/返回答案（对齐 query() / run_turn）
+src/core/events.ts
+AgentEvent
+（stream_delta / tool_use_started / …）+
+ContinueReason
+（7 个 continue site 枚举）
+src/core/streaming-executor.ts
+并发控制执行器：读工具并行、写工具独占（对齐 StreamingToolExecutor）
+src/model/model-client.ts
+stream()
+实现：OpenAI SSE 流式解析 + 失败回退非流式；FakeModel 逐字流式
+② 分层配置 + AGENTS.md/CLAUDE.md 注入（4.10）
+文件
+作用
+src/config/toml.ts
+极简 TOML 解析器（注释 / 键值 /
+[section]
+）
+src/config/layered-config.ts
+loadLayeredConfig
+：builtin &lt; user(
+~/.swe-agent/config.toml
+) &lt; project(
+./.swe-agent/config.toml
+) &lt; local(.env/CLI)
+src/config/agents-md.ts
+discoverAgentMemories
+向上逐级查找 +
+.git
+根标记停止 + 字节预算截断
+src/core/prompt-builder.ts
+system prompt 新增「项目记忆」section，按稳定→动态顺序注入
+配套改动
+：
+types.ts
+（
+ModelStreamEvent
+/
+ModelClient.stream
+/
+AgentContext.agentMemories
+）、
+tools/types.ts
++
+registry.ts
++各工具（
+isReadOnly
+标记，供并发判定）、
+index.ts
+（改用
+AgentSession
++ 分层配置 + 事件输出）。
+验证结果
+✅
+npm run typecheck
+/
+npm run build
+通过
+✅ FakeModel demo 运行：流式逐字输出带
+[流式输出]
+前缀，工具调用、最终答案、执行轨迹正常
+✅
+parseToml
+解析验证通过（键值 +
+[model]
+子节）
+✅
+discoverAgentMemories
+/
+loadAgentMemories
+验证通过，demo 显示
+项目记忆: 已加载 8 行
+如何使用新能力
+# .swe-agent/config.toml（项目级，自动生效）
+max_steps = 30
+max_context_tokens = 16000
+[model]
+base_url = &quot;https://open.bigmodel.cn/api/paas/v4&quot;
+model = &quot;glm-4.7-flash&quot;
+npm run build
+node dist/index.js &quot;你的任务&quot;
+我已创建了一个示例
+AGENTS.md
+（项目根目录），验证注入链路用；你可按需修改或删除。
+两点说明
+src/core/agent.ts
+保留未动
+——旧
+Agent
+类仍可编译运行，
+index.ts
+已切换到新的
+AgentSession
+；确认不需要后可删掉旧类。
+流式是基础设施
+：当前 JSON 协议下模型每步只输出一个工具调用，
+stream()
+的收益是实时显示 + 为后续多工具并行预执行铺路；
+StreamingToolExecutor
+的读并行/写串行判定已接入，待协议升级后自然生效。

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { JsonSchema, ShellResult, ToolResult } from "../types.js";
-import type { Tool } from "./types.js";
+import type { Tool, RuntimeExecuteOptions } from "./types.js";
 
 interface ShellSpec {
   command: string;
@@ -229,11 +229,19 @@ export const runCommandTool: Tool = {
   name: "run_command",
   description: "在持久终端会话中执行一条命令，并返回输出与退出码（cd/环境变量等状态会保留）",
   parameters: runCommandSchema,
-  async execute(input, ctx): Promise<ToolResult> {
+  async execute(input, ctx, options?: RuntimeExecuteOptions): Promise<ToolResult> {
     const command = String(input.command ?? "");
     if (!command) return { toolName: "run_command", output: "缺少 command", isError: true };
     const timeoutMs = typeof input.timeoutMs === "number" ? input.timeoutMs : ctx.config.toolTimeoutMs;
-    const result = await ctx.shell.run(command, timeoutMs);
+    const result = ctx.sandboxProvider
+      ? await ctx.sandboxProvider.execute({
+          command,
+          cwd: ctx.workspaceRoot,
+          timeoutMs,
+          signal: options?.signal,
+          requirements: { filesystem: "workspace", network: false, subprocess: true, workingDirectory: true, environment: "filtered", timeout: true, cancellation: true },
+        })
+      : await ctx.shell.run(command, timeoutMs);
     ctx.workingMemory["lastCommand"] = command;
     ctx.workingMemory["lastExitCode"] = result.exitCode;
     return {

@@ -4,7 +4,7 @@
 
 - 本项目是 `minimal-swe-agent`，使用 TypeScript 编写的单 Agent SWE Agent 原型。
 - TypeScript 必须保持 `strict` 模式；新增代码优先使用现有类型、模块边界和错误处理模式。
-- 当前完成范围是 Phase 1/2 原型、Phase 3 M0 和 M1。M2 及以后的设计只代表规划，不得在文档、日志或代码注释中写成已实现。
+- 当前完成范围是 Phase 1/2 原型、Phase 3 M0/M1/M2/M3/M3.5；M4 及以后的设计只代表规划，不得在文档、日志或代码注释中写成已实现。
 
 ## 验证要求
 

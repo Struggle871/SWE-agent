@@ -1,5 +1,6 @@
 import type { AgentConfig, CompletedTaskSummary, Message, Task } from "../types.js";
-import type { Tool } from "../tools/types.js";
+import type { ToolSpec } from "../tools/types.js";
+import { qualifiedName } from "../tools/registry.js";
 
 const MESSAGE_OVERHEAD = 4; // 每条消息的角色/分隔符开销（估算）
 
@@ -10,7 +11,7 @@ export class PromptBuilder {
     completedTasks?: CompletedTaskSummary[];
     workingMemory?: Record<string, unknown>;
     agentMemories?: string;
-    tools: Tool[];
+    tools: ToolSpec[];
     config: AgentConfig;
   }): Message[] {
     const { messages, currentTask, completedTasks, workingMemory, agentMemories, tools, config } = opts;
@@ -24,14 +25,14 @@ export class PromptBuilder {
   }
 
   private buildSystemPrompt(
-    tools: Tool[],
+    tools: ToolSpec[],
     task?: Task,
     completedTasks?: CompletedTaskSummary[],
     workingMemory?: Record<string, unknown>,
     agentMemories?: string,
   ): string {
     const toolList = tools
-      .map((t) => `- ${t.name}: ${t.description}\n  参数: ${JSON.stringify(t.parameters)}`)
+      .map((t) => `- ${qualifiedName(t)}: ${t.description}\n  参数: ${JSON.stringify(t.parameters)}`)
       .join("\n");
 
     const taskLine = task ? task.description : "（无）";

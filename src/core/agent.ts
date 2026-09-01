@@ -41,7 +41,7 @@ export class Agent {
             currentTask: task,
             completedTasks,
             workingMemory: ctx.workingMemory,
-            tools: ctx.registry.list(),
+            tools: ctx.registry.visibleSpecs(),
             config: ctx.config,
           }),
           { temperature: 0, maxTokens: ctx.config.maxOutputTokens },

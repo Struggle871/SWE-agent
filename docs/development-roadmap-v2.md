@@ -45,7 +45,7 @@ npm test
 - `npm run typecheck` 通过。
 - `npm run build` 通过。
 - `USE_FAKE_MODEL=true node dist/index.js ...` 可以完成一轮工具调用。
-- `AgentSession` 和 `runTurn` 已拆分。
+- `AgentSession` 和 `runStep` 已拆分，`runTurn` 仅作为旧名称兼容别名。
 - 支持模型文本 SSE、JSON/ReAct 输出解析和有限解析重试。
 - 支持文件读写、精确字符串编辑、目录和内容搜索、持久终端。
 - 已有 read-before-edit、mtime 检查和部分敏感路径拒绝。
@@ -449,6 +449,7 @@ src/protocol/
 
 - `SessionId`
 - `TurnId`
+- `StepId`
 - `RequestId`
 - `CallId`
 - `HistoryOrdinal`

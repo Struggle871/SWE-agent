@@ -98,7 +98,7 @@ src/model/model-client.ts             # OpenAI 兼容 chat/stream/FakeModel
 
 1. `Message` 只能表达字符串，无法表达 tool call id、并行调用、响应 item、压缩 checkpoint、图片/自定义输入和中断事件。
 2. `AgentSession` 与 `Agent` 并存，两个主循环容易产生行为漂移；应删除旧 `Agent`，只保留一个 `SessionCoordinator`。
-3. `runTurn` 每次只接收一个完整文本；stream 中没有工具调用事件，`StreamingToolExecutor` 也没有被消费。
+3. `runStep` 每次只推进一个模型响应和最多一个工具调用；M2 已接入结构化模型事件，但 `StreamingToolExecutor` 仍未被消费。
 4. `Executor` 绕过 approval、hook、sandbox、工具参数 schema 和结果 spill；工具自身承担了太多安全责任。
 5. `CompactionPipeline` 返回新数组，但没有将压缩作为 transcript event 持久化，resume 后无法保持同样语义。
 6. `FileStateCache` 只检查 mtime/size，不能检测 inode 替换、符号链接、外部写入竞态，也无法给 patch 提供基线 hash。
@@ -200,6 +200,7 @@ src/
 ```ts
 type SessionId = string & { readonly __brand: "SessionId" };
 type TurnId = string & { readonly __brand: "TurnId" };
+type StepId = string & { readonly __brand: "StepId" };
 type CallId = string & { readonly __brand: "CallId" };
 
 type ResponseItem =
@@ -504,7 +505,7 @@ handler 类型：command、prompt、agent、HTTP、in-process callback。每个 
 
 ### 11.2 Metrics
 
-所有日志和事件都关联 `sessionId`、`turnId`、`callId`、`promptId`：
+所有日志和事件都关联 `sessionId`、`turnId`、`stepId`、`callId`、`promptId`：
 
 - provider latency、TTFT、stream duration、retry/fallback；
 - input/output/cached tokens、compaction 前后 token、预算剩余；

@@ -28,15 +28,15 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 
 ## 当前状态
 
-当前版本为 v0.2 单 Agent 原型：
+当前版本为 v0.4 单 Agent 原型：
 
 - Phase 1：任务规划、ReAct/JSON 输出解析、流式模型输出、文件/搜索/终端工具，已完成原型。
 - Phase 2：Token 估算、工具结果落盘、上下文压缩、分层配置和项目记忆注入，已完成原型。
 - Phase 3 M0：工程基线和回归测试，已完成。
 - Phase 3 M1：工具 preflight、执行预览、权限审批、审批后复检、工作区校验、文件 hash 和审计，已接入主执行链。
-- M2：原生模型事件协议，规划中。
-- M3：ToolRouter、Registry 和 Runtime 分离，规划中。
-- M3.5：Shell tokenizer、命令链 AST、子命令风险合并和 SandboxProvider，规划中。
+- Phase 3 M2：typed session/turn/step/request/call IDs、结构化 ResponseItem、ModelTransport 事件流、原生 tool call、usage/request 关联和 legacy Chat/ReAct 适配，已完成。
+- Phase 3 M3：ToolSpec/ToolRuntime/ToolRegistry 分离、ToolRouter、schema 字段路径校验、读写并发 gate，已接入主执行链。
+- Phase 3 M3.5：Shell tokenizer、命令链 AST、子命令风险合并和可替换 SandboxProvider，已接入主执行链。当前内置 `LocalSandboxProvider` 是跨平台受限子进程 adapter，不宣称 OS 级沙箱；动态语义和缺失能力会保守拒绝。
 - M4 及以后：Session/Turn 状态机、Transcript/Resume/Fork、任务图、Hooks、Skills、MCP、多 Agent 和可观测性，规划中。
 
 ## 功能更新日志
@@ -51,6 +51,13 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 - 增加 `CliApprovalBroker` 与 `StaticApprovalBroker`，支持一次批准、本会话同类操作批准和默认拒绝。
 - 增加 JSONL 审计记录，对 API key、token、password、完整内容和 diff 做脱敏或省略。
 - 修复命令分析 `ask` 被只读权限策略降级为 `allow` 的问题；Preflight 现在按 `deny > ask > allow` 合并最低安全限制和环境权限策略。
+
+### v0.3 · 2026-08-30
+
+- 增加 `src/protocol/`：branded session/turn/step/request/call IDs、ResponseItem、ModelEvent、ModelTransport、usage 和 AgentError 判别联合。
+- 核心 step 现在消费 provider-neutral `ModelEvent`；原生 tool call 使用模型提供的稳定 call id，继续进入 M1 的 preflight、approval、revalidation、runtime 和 audit 链路。
+- FakeModel 提供结构化 tool call 事件流；OpenAI Chat Completions 解析原生 tool-call SSE，并保留旧 JSON/ReAct 文本兼容路径。
+- usage 事件带有 request id 关联；新增 M2 协议、SSE 和端到端安全链路测试。
 
 ## 内置工具
 
@@ -93,7 +100,7 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 - 明确越界路径、严重破坏命令和 bypass-immune 路径直接 `deny`。
 - 非交互终端无法安全询问用户时，审批默认拒绝。
 
-`CommandAnalyzer` 当前是 M1 的保守静态筛选器，主要识别只读、删除、网络、管道、重定向、动态展开、脚本执行和工作区越界。它不是完整 Shell AST，也不是 OS sandbox。M3.5 将升级为按 Shell tokenizer/AST 分析，并接入 SandboxProvider。
+`CommandAnalyzer` 现在通过目标 Shell adapter 解析 tokenizer/AST，按子命令合并风险，识别引号、转义、命令链、重定向、嵌套子 Shell、动态展开和工作区路径。它仍不是操作系统本身；`LocalSandboxProvider` 只提供 cwd、过滤环境、退出状态、超时和取消能力，平台级隔离需替换为 OS adapter。
 
 ## 审批与沙箱
 
@@ -102,7 +109,7 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 - `ApprovalBroker` 决定用户是否同意当前 Preview 描述的操作。
 - 审批后系统重新计算路径、权限、命令分析结果和文件 hash；状态变化会使旧审批失效。
 - 当前版本没有 OS 级 sandbox。批准任意 Shell 命令仍代表用户接受该命令可能产生的系统级副作用。
-- M3.5 规划通过 `SandboxProvider` 接入受限子进程、文件系统边界、网络限制、环境变量和资源限制；沙箱能力不可用时必须保守降级为 `ask` 或 `deny`。
+- `SandboxProvider` 表达文件系统、网络、子进程、工作目录、环境变量、超时和取消能力；能力不足不会静默执行未隔离命令。
 
 ## 持久终端
 
@@ -111,7 +118,7 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 - Windows 使用 `cmd.exe`，Unix 使用 `/bin/bash`。
 - `cd`、环境变量和后台任务输出可以在同一会话中保留。
 - 命令超时后会终止进程树并重启 Shell，会话状态回到初始工作目录。
-- 当前安全层仍以 `workspaceRoot` 作为命令静态分析的 CWD；真实 canonical CWD 状态模型属于后续 M3.5/M4 的改进范围。
+- 当前安全层仍以 `workspaceRoot` 作为命令静态分析和 sandbox adapter 的 CWD；持久 Shell 的 canonical CWD 状态模型属于后续 M4 的改进范围。
 
 ## Token 用量与上下文
 
@@ -159,7 +166,7 @@ npm run build
 npm run check
 ```
 
-当前基线为 23 项测试全部通过。
+当前基线为 38 项测试全部通过。
 
 ## 目录结构
 

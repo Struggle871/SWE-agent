@@ -4,7 +4,7 @@
 
 ## 1. 当前结论
 
-M0 工程基线与 M1 工具安全阶段已经接入当前主执行链。`AgentSession -> runTurn -> Executor -> Tool` 中，每次已注册工具调用都必须经过统一 preflight。新增模块不是旁路设计，CLI、FakeModel 端到端执行和现有文件、搜索、终端工具都使用同一条路径。
+M0 工程基线与 M1 工具安全阶段已经接入当前主执行链。`AgentSession -> runStep -> Executor -> Tool` 中，每次已注册工具调用都必须经过统一 preflight。新增模块不是旁路设计，CLI、FakeModel 端到端执行和现有文件、搜索、终端工具都使用同一条路径。
 
 本阶段建立以下不变量：
 

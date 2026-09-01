@@ -8,6 +8,7 @@ import { AuditTrail } from "../src/security/audit.js";
 import { DefaultCommandAnalyzer } from "../src/security/command-policy.js";
 import { PermissionPolicy } from "../src/security/permission-policy.js";
 import { WorkspacePolicy } from "../src/security/workspace-policy.js";
+import { LocalSandboxProvider } from "../src/security/sandbox.js";
 import { editFileTool } from "../src/tools/edit.js";
 import { listDirTool, readFileTool, writeFileTool } from "../src/tools/file-io.js";
 import { ToolRegistry } from "../src/tools/registry.js";
@@ -40,6 +41,7 @@ export async function makeContext(root: string, approvalBroker: ApprovalBroker =
     permissionPolicy: new PermissionPolicy(),
     approvalBroker,
     auditTrail: new AuditTrail(),
+    sandboxProvider: new LocalSandboxProvider(root),
   };
 }
 

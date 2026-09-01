@@ -1,17 +1,18 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import type { AgentContext, JsonSchema } from "../types.js";
-import type { Tool } from "./types.js";
+import type { AgentContext } from "../types.js";
+import type { ToolSpec } from "./types.js";
 import type { ToolDecision, ToolExecutionPreview, ToolPreflightResult, ToolRisk } from "./preview.js";
 import { createUnifiedDiff } from "./diff.js";
+import { qualifiedName, validateToolInput } from "./registry.js";
 
 const READ_PATH_TOOLS = new Set(["read_file", "list_dir", "search_files", "search_content"]);
 const WRITE_PATH_TOOLS = new Set(["write_file", "edit_file"]);
 
 export class ToolPreflight {
-  async run(callId: string, tool: Tool, input: Record<string, unknown>, ctx: AgentContext): Promise<ToolPreflightResult> {
-    const normalizedInput = validateAndNormalize(tool.parameters, input);
+  async run(callId: string, tool: ToolSpec, input: Record<string, unknown>, ctx: AgentContext): Promise<ToolPreflightResult> {
+    const normalizedInput = validateToolInput(tool.parameters, input);
     const affectedPaths: string[] = [];
     const fileHashes: Record<string, string | null> = {};
     let risk: ToolRisk = tool.isReadOnly ? "read" : "execute";
@@ -45,6 +46,7 @@ export class ToolPreflight {
       command = String(normalizedInput.command ?? "");
       commandAssessment = await ctx.commandAnalyzer.analyze(command, ctx.workspaceRoot);
       risk = commandAssessment.risk;
+      affectedPaths.push(...(commandAssessment.affectedPaths ?? []));
       summary = `run_command: ${command}`;
     } else if (tool.name === "read_terminal_output") {
       risk = "read";
@@ -59,7 +61,7 @@ export class ToolPreflight {
       : policy.reasons;
     const preview: ToolExecutionPreview = {
       callId,
-      toolName: tool.name,
+      toolName: qualifiedName(tool),
       summary,
       risk,
       cwd: ctx.workspaceRoot,
@@ -69,7 +71,7 @@ export class ToolPreflight {
       reasons,
     };
     const permissionFingerprint = hashText(stableStringify({
-      tool: tool.name,
+      tool: qualifiedName(tool),
       input: normalizedInput,
       paths: affectedPaths,
       fileHashes,
@@ -86,27 +88,6 @@ export class ToolValidationError extends Error {
     super(message);
     this.name = "ToolValidationError";
   }
-}
-
-function validateAndNormalize(schema: JsonSchema, input: Record<string, unknown>): Record<string, unknown> {
-  if (!input || typeof input !== "object" || Array.isArray(input)) throw new ToolValidationError("工具输入必须是对象");
-  const normalized: Record<string, unknown> = { ...input };
-  for (const name of schema.required ?? []) {
-    if (!(name in normalized) || normalized[name] === undefined || normalized[name] === null) {
-      throw new ToolValidationError(`缺少必填参数: ${name}`);
-    }
-  }
-  for (const [name, value] of Object.entries(normalized)) {
-    const property = schema.properties?.[name];
-    if (!property) throw new ToolValidationError(`未知参数: ${name}`);
-    if (value !== undefined && typeof value !== property.type) {
-      throw new ToolValidationError(`参数 ${name} 类型错误，期望 ${property.type}`);
-    }
-  }
-  for (const [name, property] of Object.entries(schema.properties ?? {})) {
-    if (!(name in normalized) && property.default !== undefined) normalized[name] = property.default;
-  }
-  return normalized;
 }
 
 function buildWriteResult(toolName: string, input: Record<string, unknown>, before: string | null): string {

@@ -8,6 +8,7 @@ import { AuditTrail } from "./security/audit.js";
 import { DefaultCommandAnalyzer } from "./security/command-policy.js";
 import { PermissionPolicy } from "./security/permission-policy.js";
 import { WorkspacePolicy } from "./security/workspace-policy.js";
+import { LocalSandboxProvider } from "./security/sandbox.js";
 import { FakeModelClient, OpenAIChatModelClient } from "./model/model-client.js";
 import { editFileTool } from "./tools/edit.js";
 import { listDirTool, readFileTool, writeFileTool } from "./tools/file-io.js";
@@ -55,6 +56,7 @@ async function main() {
     permissionPolicy: new PermissionPolicy(),
     approvalBroker: new CliApprovalBroker(),
     auditTrail: new AuditTrail(`${config.workspaceRoot}/.swe-agent/audit.jsonl`),
+    sandboxProvider: new LocalSandboxProvider(config.workspaceRoot),
   };
 
   const userRequest = process.argv[2] ?? "列出当前目录内容，然后给出最终结论";

@@ -1,5 +1,5 @@
-// 会话生命周期（双层结构的外层）：任务规划、步数/预算控制、结果提取、事件分发。
-// 单轮推进委托给 runTurn（内层），对齐 Claude Code QueryEngine / Codex Session。
+// 会话生命周期：一次 run 是 Turn，内部按 Step 推进模型请求和工具处理。
+// 单步推进委托给 runStep，AgentSession 负责任务规划、预算、结果和事件分发。
 
 import type {
   AgentContext,
@@ -7,26 +7,27 @@ import type {
   AgentStep,
   CompletedTaskSummary,
   Message,
-  ModelStreamEvent,
   Task,
 } from "../types.js";
 import type { AgentEvent } from "./events.js";
 import { Executor } from "./executor.js";
 import { OutputParser } from "./output-parser.js";
 import { PromptBuilder } from "./prompt-builder.js";
-import { StreamingToolExecutor } from "./streaming-executor.js";
 import { TaskPlanner } from "./task-planner.js";
 import { TaskScheduler } from "./task-scheduler.js";
-import { runTurn } from "./turn.js";
+import { runStep } from "./turn.js";
 import { CompactionPipeline } from "./context/compaction-pipeline.js";
 import { ToolResultStorage } from "./context/tool-result-storage.js";
+import { createRequestId, createSessionId, createStepId, createTurnId } from "../protocol/ids.js";
+import type { ModelMessage, ModelRequest } from "../protocol/model-events.js";
+import { modelTransportFor } from "../model/transport.js";
+import { qualifiedName } from "../tools/registry.js";
 
 export class AgentSession {
   private scheduler = new TaskScheduler();
   private promptBuilder = new PromptBuilder();
   private parser = new OutputParser();
   private executor = new Executor();
-  private streamingExecutor: StreamingToolExecutor;
   private planner: TaskPlanner;
   private events: AgentEvent[] = [];
   private compaction: CompactionPipeline;
@@ -36,7 +37,6 @@ export class AgentSession {
     private onEvent?: (e: AgentEvent) => void,
   ) {
     this.planner = new TaskPlanner(ctx.model, ctx.config.useLlmPlanning);
-    this.streamingExecutor = new StreamingToolExecutor(ctx, ctx.registry, this.executor);
     this.compaction = new CompactionPipeline(new ToolResultStorage(`${ctx.workspaceRoot}/.swe-agent/session`));
   }
 
@@ -47,12 +47,17 @@ export class AgentSession {
 
   async run(userRequest: string): Promise<AgentRunResult> {
     const { ctx } = this;
+    const sessionId = createSessionId();
+    this.emit({ type: "session_started", sessionId });
+    const turnId = createTurnId();
+    this.emit({ type: "turn_started", sessionId, turnId });
     const tasks = await this.planner.plan(userRequest);
     this.scheduler.push(tasks);
 
     const history: Message[] = [{ role: "user", content: userRequest }];
     const trace: AgentStep[] = [];
     const completedTasks: CompletedTaskSummary[] = [];
+    const transport = modelTransportFor(ctx.model);
     let steps = 0;
     let currentTask: Task | undefined;
 
@@ -62,6 +67,9 @@ export class AgentSession {
         if (!currentTask) break;
       }
       const task = currentTask;
+      const stepId = createStepId();
+      const stepIndex = steps;
+      this.emit({ type: "step_started", sessionId, turnId, stepId });
 
       const compacted = await this.compaction.compact(history, {
         budgetTokens: ctx.config.maxContextTokens,
@@ -78,26 +86,25 @@ export class AgentSession {
           currentTask: task,
           completedTasks,
           workingMemory: ctx.workingMemory,
-          tools: ctx.registry.list(),
+          tools: ctx.registry.visibleSpecs(),
           config: ctx.config,
           agentMemories: ctx.agentMemories,
         });
 
       // 优先流式；不支持 stream 的模型回退为 chat 包装成生成器
-      const generate = (): AsyncGenerator<ModelStreamEvent> => {
+      const generate = () => {
         const messages = buildMessages();
-        const opts = { temperature: 0, maxTokens: ctx.config.maxOutputTokens };
-        if (ctx.model.stream) {
-          return ctx.model.stream(messages, opts);
-        }
-        return (async function* () {
-          const text = await ctx.model.chat(messages, opts);
-          yield { type: "text_delta" as const, text };
-          yield { type: "done" as const, raw: text };
-        })();
+        const request: ModelRequest = {
+          requestId: createRequestId(),
+          messages: messages.map(toModelMessage),
+          tools: ctx.registry.visibleSpecs().map((tool) => ({ name: qualifiedName(tool), description: tool.description, parameters: tool.parameters })),
+          temperature: 0,
+          maxOutputTokens: ctx.config.maxOutputTokens,
+        };
+        return transport.stream(request, new AbortController().signal);
       };
 
-      const turn = await runTurn({
+      const step = await runStep({
         history,
         generate,
         parser: this.parser,
@@ -105,55 +112,90 @@ export class AgentSession {
         executor: this.executor,
         ctx,
         parseRetry: ctx.config.parseRetry,
+        nativeToolCalls: transport.capabilities().nativeToolCalls,
         onEvent: (e) => this.emit(e),
       });
+      steps += 1;
+      this.emit({ type: "step_completed", sessionId, turnId, stepId });
 
-      if (turn.action === null) {
+      if (step.action === null) {
         task.status = "failed";
         trace.push({
-          index: steps,
+          index: stepIndex,
           action: {
             type: "final_answer",
             thought: "解析失败",
-            answer: turn.finalAnswerText ?? "",
+            answer: step.finalAnswerText ?? "",
           },
-          rawOutput: turn.raw,
+          rawOutput: step.raw,
           timestamp: Date.now(),
+          sessionId,
+          turnId,
+          stepId,
+          requestId: step.requestId,
+          usage: step.usage,
         });
         break;
       }
 
-      const action = turn.action;
+      const action = step.action;
       if (action.type === "final_answer") {
         task.status = "done";
         completedTasks.push({ description: task.description, result: action.answer });
-        trace.push({ index: steps, action, rawOutput: turn.raw, timestamp: Date.now() });
+        trace.push({
+          index: stepIndex,
+          action,
+          rawOutput: step.raw,
+          timestamp: Date.now(),
+          sessionId,
+          turnId,
+          stepId,
+          requestId: step.requestId,
+          usage: step.usage,
+        });
         this.emit({ type: "final_answer", answer: action.answer });
         if (this.scheduler.isEmpty()) {
-          return { answer: action.answer, steps, history, taskTrace: trace };
+          this.emit({ type: "turn_completed", sessionId, turnId });
+          return { answer: action.answer, steps, history, taskTrace: trace, sessionId, turnId };
         }
         currentTask = undefined;
         continue;
       }
 
       trace.push({
-        index: steps,
+        index: stepIndex,
         action,
-        observation: turn.observation,
-        rawOutput: turn.raw,
+        observation: step.observation,
+        rawOutput: step.raw,
         timestamp: Date.now(),
+        sessionId,
+        turnId,
+        stepId,
+        requestId: step.requestId,
+        usage: step.usage,
       });
-      steps += 1;
     }
 
     const answer = "达到最大步数或任务队列为空，任务未完成。";
-    this.emit({ type: "max_turns_reached" });
-    return { answer, steps, history, taskTrace: trace };
+    this.emit({ type: "turn_completed", sessionId, turnId });
+    if (steps >= ctx.config.maxSteps) this.emit({ type: "max_steps_reached" });
+    return { answer, steps, history, taskTrace: trace, sessionId, turnId };
   }
   private recentFiles(ctx: AgentContext): string[] {
     return [ctx.workingMemory.lastReadFile, ctx.workingMemory.lastWrittenFile].filter(
       (file): file is string => typeof file === "string",
     );
   }
+}
+
+function toModelMessage(message: Message): ModelMessage {
+  return {
+    role: message.role,
+    content: message.content,
+    name: message.name,
+    usage: message.usage,
+    toolCalls: message.toolCalls,
+    toolCallId: message.toolCallId,
+  };
 }
 

@@ -1,88 +1,78 @@
-// 流式工具执行器：读工具可并行、写工具独占（对齐 Claude Code StreamingToolExecutor 的并发控制）。
-// 当前 JSON 协议下模型每步只输出一个工具调用，此处先落地并发安全判定与队列结构，
-// 为后续多工具流式并行执行预留。
-
 import { randomUUID } from "node:crypto";
 import type { AgentAction, AgentContext, ToolResult } from "../types.js";
-import type { ToolRegistry } from "../tools/registry.js";
 import { Executor } from "./executor.js";
 
 type ToolCallAction = Extract<AgentAction, { type: "tool_call" }>;
+type QueueStatus = "queued" | "executing" | "completed";
 
 interface QueuedTool {
   id: string;
   action: ToolCallAction;
-  status: "queued" | "executing" | "completed";
-  isConcurrencySafe: boolean;
+  status: QueueStatus;
+  isReadOnly: boolean;
   result?: ToolResult;
 }
 
+/** Promise-driven read/write gate. Results remain in submission order. */
 export class StreamingToolExecutor {
-  private queue: QueuedTool[] = [];
+  private readonly queue: QueuedTool[] = [];
+  private active = 0;
+  private activeReads = 0;
+  private wake: (() => void) | undefined;
+  private scheduling = false;
 
-  constructor(
-    private ctx: AgentContext,
-    private registry: ToolRegistry,
-    private executor: Executor,
-  ) {}
+  constructor(private readonly ctx: AgentContext, private readonly executor = new Executor()) {}
 
   addTool(action: ToolCallAction): void {
-    this.queue.push({
-      id: randomUUID(),
-      action,
-      status: "queued",
-      isConcurrencySafe: this.registry.isReadOnly(action.toolName),
-    });
-    void this.processQueue();
-  }
-
-  // 并发控制：读操作可与其它读操作并行；写操作独占执行
-  private canExecute(t: QueuedTool, executing: QueuedTool[]): boolean {
-    return (
-      executing.length === 0 ||
-      (t.isConcurrencySafe && executing.every((e) => e.isConcurrencySafe))
-    );
-  }
-
-  private async processQueue(): Promise<void> {
-    while (this.queue.some((t) => t.status !== "completed")) {
-      const executing = this.queue.filter((t) => t.status === "executing");
-      let started = false;
-      for (const t of this.queue) {
-        if (t.status !== "queued" || !this.canExecute(t, executing)) continue;
-        t.status = "executing";
-        started = true;
-        this.executor
-          .execute(t.action, this.ctx)
-          .then((r) => {
-            t.result = r;
-            t.status = "completed";
-          })
-          .catch((e) => {
-            t.result = {
-              toolName: t.action.toolName,
-              output: `工具执行异常: ${String(e)}`,
-              isError: true,
-            };
-            t.status = "completed";
-          });
-        break; // 每轮只启动一个，避免饿死
-      }
-      if (!started && this.queue.every((t) => t.status === "completed")) break;
-      if (!started) break; // 防止忙等：无可启动且未全部完成时跳出
-      await new Promise((r) => setTimeout(r, 2));
-    }
+    const spec = this.ctx.registry.getSpec(action.toolName);
+    this.queue.push({ id: randomUUID(), action, status: "queued", isReadOnly: spec?.isReadOnly === true && spec.parallelizable !== false });
+    this.schedule();
   }
 
   async collect(): Promise<ToolResult[]> {
-    // 等待所有任务完成（按提交顺序返回）
-    while (this.queue.some((t) => t.status !== "completed")) {
-      await new Promise((r) => setTimeout(r, 5));
+    while (this.queue.some((task) => task.status !== "completed")) {
+      await new Promise<void>((resolve) => { this.wake = resolve; });
+      this.schedule();
     }
-    return this.queue.map((t) => t.result ?? { toolName: t.action.toolName, output: "", isError: true });
+    return this.queue.map((task) => task.result ?? { toolName: task.action.toolName, output: "", isError: true });
   }
 
-  get pendingCount(): number {
-    return this.queue.filter((t) => t.status !== "completed").length;
+  get pendingCount(): number { return this.queue.filter((task) => task.status !== "completed").length; }
+
+  private schedule(): void {
+    if (this.scheduling) return;
+    this.scheduling = true;
+    try {
+      while (true) {
+        const next = this.queue.find((task) => task.status === "queued" && this.canStart(task));
+        if (!next) break;
+        next.status = "executing";
+        this.active += 1;
+        if (next.isReadOnly) this.activeReads += 1;
+        void this.execute(next);
+      }
+    } finally {
+      this.scheduling = false;
+    }
+  }
+
+  private canStart(task: QueuedTool): boolean {
+    return task.isReadOnly ? this.active === this.activeReads : this.active === 0;
+  }
+
+  private async execute(task: QueuedTool): Promise<void> {
+    try {
+      task.result = await this.executor.execute(task.action, this.ctx);
+    } catch (error) {
+      task.result = { toolName: task.action.toolName, output: `工具执行异常: ${String(error)}`, isError: true };
+    } finally {
+      task.status = "completed";
+      this.active -= 1;
+      if (task.isReadOnly) this.activeReads -= 1;
+      const wake = this.wake;
+      this.wake = undefined;
+      wake?.();
+      this.schedule();
+    }
   }
 }

@@ -6,20 +6,23 @@ import type { AuditTrail } from "./security/audit.js";
 import type { CommandAnalyzer } from "./security/command-policy.js";
 import type { PermissionPolicy } from "./security/permission-policy.js";
 import type { WorkspacePolicy } from "./security/workspace-policy.js";
+import type { SandboxProvider } from "./security/sandbox.js";
+import type { ModelTransport } from "./protocol/model-events.js";
+import type { CallId, RequestId, SessionId, StepId, TurnId } from "./protocol/ids.js";
+import type { Usage as ProtocolUsage } from "./protocol/usage.js";
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
-export interface Usage {
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-}
+export type Usage = ProtocolUsage;
 
 export interface Message {
   role: Role;
   content: string;
   name?: string;
   usage?: Usage;
+  requestId?: RequestId;
+  toolCalls?: Array<{ callId: CallId; name: string; input: unknown }>;
+  toolCallId?: CallId;
 }
 
 export interface ToolResult {
@@ -33,6 +36,7 @@ export type JsonSchema = {
   type: "object";
   properties?: Record<string, JsonSchemaProperty>;
   required?: string[];
+  additionalProperties?: boolean;
 };
 
 export type JsonSchemaProperty = {
@@ -44,7 +48,7 @@ export type JsonSchemaProperty = {
 };
 
 export type AgentAction =
-  | { type: "tool_call"; thought?: string; toolName: string; toolInput: Record<string, unknown> }
+  | { type: "tool_call"; thought?: string; toolName: string; toolInput: Record<string, unknown>; callId?: CallId }
   | { type: "final_answer"; thought?: string; answer: string };
 
 export interface AgentStep {
@@ -53,6 +57,11 @@ export interface AgentStep {
   observation?: ToolResult;
   rawOutput: string;
   timestamp: number;
+  sessionId?: SessionId;
+  turnId?: TurnId;
+  stepId?: StepId;
+  requestId?: RequestId;
+  usage?: Usage;
 }
 
 export interface Task {
@@ -91,6 +100,8 @@ export interface AgentContext {
   permissionPolicy: PermissionPolicy;
   approvalBroker: ApprovalBroker;
   auditTrail: AuditTrail;
+  /** M3.5 runtime 的可替换沙箱；缺失时 run_command 必须拒绝执行。 */
+  sandboxProvider?: SandboxProvider;
 }
 
 export interface AgentConfig {
@@ -113,6 +124,8 @@ export interface ModelClient {
   chat(messages: Message[], options?: ChatOptions): Promise<string>;
   /** 流式接口（可选）：逐 token 输出，最终以 done 事件收尾 */
   stream?(messages: Message[], options?: ChatOptions): AsyncGenerator<ModelStreamEvent>;
+  /** M2 provider-neutral 事件流；旧模型由 LegacyModelTransportAdapter 兼容。 */
+  transport?: ModelTransport;
 }
 
 export interface ChatOptions {
@@ -125,4 +138,6 @@ export interface AgentRunResult {
   steps: number;
   history: Message[];
   taskTrace: AgentStep[];
+  sessionId?: SessionId;
+  turnId?: TurnId;
 }

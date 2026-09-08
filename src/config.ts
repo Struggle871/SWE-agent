@@ -27,7 +27,24 @@ export function loadConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     },
     useFakeModel,
     useLlmPlanning: (env.USE_LLM_PLANNING ?? "false").trim().toLowerCase() === "true",
+    compaction: {
+      backend: parseBackend(env.COMPACTION_BACKEND),
+      autoCompactTokenLimit: Number(env.AUTO_COMPACT_TOKEN_LIMIT ?? Math.floor(Number(env.MAX_CONTEXT_TOKENS ?? 8000) * 0.8)),
+      limitScope: env.AUTO_COMPACT_LIMIT_SCOPE === "body_after_prefix" ? "body_after_prefix" : "total",
+      fallbackBufferTokens: Number(env.COMPACTION_FALLBACK_BUFFER_TOKENS ?? 512),
+      timeoutMs: Number(env.COMPACTION_TIMEOUT_MS ?? 60_000),
+      maxRetries: Number(env.COMPACTION_MAX_RETRIES ?? 2),
+      maxRetainedUserTokens: Number(env.COMPACTION_MAX_RETAINED_USER_TOKENS ?? 2_000),
+      maxCheckpointItems: Number(env.COMPACTION_MAX_CHECKPOINT_ITEMS ?? 1_000),
+      maxCheckpointBytes: Number(env.COMPACTION_MAX_CHECKPOINT_BYTES ?? 2_000_000),
+      maxItemBytes: Number(env.COMPACTION_MAX_ITEM_BYTES ?? 256_000),
+      ...(env.COMPACTION_PROMPT ? { prompt: env.COMPACTION_PROMPT } : {}),
+    },
   };
 
   return { ...config, ...overrides };
+}
+
+function parseBackend(value: string | undefined): "auto" | "local" | "remote" | "remote_v2" | "new_context" {
+  return value === "local" || value === "remote" || value === "remote_v2" || value === "new_context" ? value : "auto";
 }

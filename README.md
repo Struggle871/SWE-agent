@@ -19,6 +19,13 @@ npm run build
 node dist/index.js "你的任务描述"
 ```
 
+恢复已有会话或创建 copied fork：
+
+```powershell
+node dist/index.js --resume <sessionId> "继续任务"
+node dist/index.js --fork <sessionId> --at <ordinal> "从该历史分支继续"
+```
+
 使用 FakeModel 演示：
 
 ```powershell
@@ -37,7 +44,13 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 - Phase 3 M2：typed session/turn/step/request/call IDs、结构化 ResponseItem、ModelTransport 事件流、原生 tool call、usage/request 关联和 legacy Chat/ReAct 适配，已完成。
 - Phase 3 M3：ToolSpec/ToolRuntime/ToolRegistry 分离、ToolRouter、schema 字段路径校验、读写并发 gate，已接入主执行链。
 - Phase 3 M3.5：Shell tokenizer、命令链 AST、子命令风险合并和可替换 SandboxProvider，已接入主执行链。当前内置 `LocalSandboxProvider` 是跨平台受限子进程 adapter，不宣称 OS 级沙箱；动态语义和缺失能力会保守拒绝。
-- M4 及以后：Session/Turn 状态机、Transcript/Resume/Fork、任务图、Hooks、Skills、MCP、多 Agent 和可观测性，规划中。
+- Phase 3 安全闭环 S0/S1：Sandbox capability 已区分 best-effort 与实际强制等级，`SandboxManager` 已接入命令准入，执行请求携带规范化 `SandboxProfile`。
+- Phase 3 Windows strict S2：Windows 默认使用 `WindowsDockerSandboxProvider`，固定启用 `network=none`、只挂载工作区、只读 rootfs、丢弃 capabilities、禁止提权和容器清理；Docker 不可用时不会静默退回裸 Shell。`SWE_SANDBOX_MODE=best-effort` 才启用本地 adapter。
+- macOS/Linux OS provider：延期，当前非 Windows CLI 使用不可用 provider 并拒绝命令执行；不会添加未实现的跨平台空壳。
+- Phase 3 M4：工作区已有 SessionCoordinator/TurnRunner、输入优先级队列、单 active turn、steer 和取消传播原型，但按当前项目阶段口径仍属于规划/验收中，不能标记为已实现。
+- Phase 3 M5：工作区已有 JSONL Transcript、Resume、copied Fork、reconstruction 和轻量索引原型，但尚未按里程碑标记完成；SQLite、reference/paginated fork、archive/revert、持久化队列/mailbox、L3 trace 等仍按后续阶段规划。设计边界见 [`docs/m5-transcript-resume-fork.md`](docs/m5-transcript-resume-fork.md)。
+- Phase 3 M6：工作区已落地持久化 context checkpoint、pre/mid/manual compaction、local/remote/remote-v2/new-context backend、window lineage、world/reference baseline、replacement-history Resume/Fork/rollback replay 和 durable-before-live 故障边界，并通过 M6 专项测试。由于 M4/M5 尚未按路线图顺序完成发布验收，这里记录为“实现已验证”，不改写整体里程碑发布状态。完整约束与实现映射见 [`docs/m6-context-checkpoint-compaction.md`](docs/m6-context-checkpoint-compaction.md)。
+- M7 及以后：配置/Skills、任务图、多 Agent、Hooks、MCP 和可观测性，规划中。
 
 ## 功能更新日志
 
@@ -59,6 +72,25 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 - FakeModel 提供结构化 tool call 事件流；OpenAI Chat Completions 解析原生 tool-call SSE，并保留旧 JSON/ReAct 文本兼容路径。
 - usage 事件带有 request id 关联；新增 M2 协议、SSE 和端到端安全链路测试。
 
+### v0.4 开发记录 · 2026-09-03（未标记 M4/M5 完成）
+
+- 新增 `SessionCoordinator`，统一管理 session 生命周期、输入队列、turn 串行化和 session 级关闭。
+- 新增 `TurnRunner`，将单个 turn 拆分为上下文准备、压缩、采样、工具派发、后续采样和 terminal state。
+- `AgentSession` 改为兼容 facade；并发 `run` 请求不会创建两个 active turn。
+- `interrupt`、`shutdown` 和调用方 `AbortSignal` 会传播到模型请求、审批等待和工具 runtime。
+- 新增 steer 输入，在下一次 sampling request 前注入历史。
+- 新增明确的 turn terminal reason、session/turn 状态事件和 step continue reason。
+- M4 原型增加并发运行、模型取消、工具取消、steer 和输入优先级测试；这些测试通过不等于里程碑已按完整设计验收。
+
+### M6 工作区实现记录 · 2026-09-05
+
+- `SessionCoordinator` 持有唯一 annotated `ContextManager`；`TurnRunner` 只使用短期请求快照，消息先写 transcript 再进入 live context。
+- schema v2 checkpoint 保存完整 replacement history、window lineage、token usage 和 resource origin；读取端兼容 v1，Resume/Fork/rollback 从最新 surviving checkpoint 重放。
+- 支持 local model handoff、Responses `/responses/compact` remote adapter、capability-driven remote-v2 transport 和 new-context backend；`PromptBuilder` 不再静默截断历史。
+- checkpoint durable append 成功后才安装 live replacement；baseline 写失败保留新 checkpoint、关闭当前 session，并由 Resume 强制 full context injection。
+- 大工具结果在进入 transcript/history 前写入 session-scoped、call-scoped、SHA-256 内容寻址 artifact，只保留有界 preview 和引用。
+- PreCompact/PostCompact、超时、取消、shutdown、transient retry、compact request overflow、invalid replacement、no-progress guard 和写入故障均进入结构化控制流。
+
 ## 内置工具
 
 | 工具 | 用途 |
@@ -69,7 +101,7 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 | `search_content` | 在文本文件中按正则搜索内容 |
 | `write_file` | 创建或覆盖工作区内 UTF-8 文本文件，可追加 |
 | `edit_file` | 将唯一 `old_string` 精确替换为 `new_string` |
-| `run_command` | 在持久 Shell 会话中执行命令并返回输出和退出码 |
+| `run_command` | 在沙箱 provider 控制的执行环境中运行命令并返回输出和退出码 |
 | `read_terminal_output` | 读取持久终端中尚未消费的输出 |
 
 新增工具必须在 `src/tools/` 实现，并通过 `ToolRegistry` 注册。
@@ -100,7 +132,7 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 - 明确越界路径、严重破坏命令和 bypass-immune 路径直接 `deny`。
 - 非交互终端无法安全询问用户时，审批默认拒绝。
 
-`CommandAnalyzer` 现在通过目标 Shell adapter 解析 tokenizer/AST，按子命令合并风险，识别引号、转义、命令链、重定向、嵌套子 Shell、动态展开和工作区路径。它仍不是操作系统本身；`LocalSandboxProvider` 只提供 cwd、过滤环境、退出状态、超时和取消能力，平台级隔离需替换为 OS adapter。
+`CommandAnalyzer` 现在通过目标 Shell adapter 解析 tokenizer/AST，按子命令合并风险，识别引号、转义、命令链、重定向、嵌套子 Shell、动态展开和工作区路径。它仍不是操作系统本身。Windows strict 模式由 `WindowsDockerSandboxProvider` 提供容器边界；`LocalSandboxProvider` 只提供 cwd、过滤环境、退出状态、超时和取消能力。
 
 ## 审批与沙箱
 
@@ -108,24 +140,40 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 
 - `ApprovalBroker` 决定用户是否同意当前 Preview 描述的操作。
 - 审批后系统重新计算路径、权限、命令分析结果和文件 hash；状态变化会使旧审批失效。
-- 当前版本没有 OS 级 sandbox。批准任意 Shell 命令仍代表用户接受该命令可能产生的系统级副作用。
-- `SandboxProvider` 表达文件系统、网络、子进程、工作目录、环境变量、超时和取消能力；能力不足不会静默执行未隔离命令。
+- Windows strict 模式提供容器级文件系统、网络和进程边界；native Windows ACL/restricted token/WFP 后端尚未实现。
+- `LocalSandboxProvider` 仍不是 OS 级 sandbox。只有显式选择 `best-effort` 时才会使用它。
+- `SandboxProvider` 表达文件系统、网络、子进程、工作目录、环境变量、超时、取消和实际 enforcement；能力不足不会静默执行未隔离命令。
 
-## 持久终端
+## 终端执行
 
-`run_command` 使用持久 Shell 子进程：
+当前 CLI 的 `run_command` 使用 provider-owned 的一次性命令执行：
 
-- Windows 使用 `cmd.exe`，Unix 使用 `/bin/bash`。
-- `cd`、环境变量和后台任务输出可以在同一会话中保留。
-- 命令超时后会终止进程树并重启 Shell，会话状态回到初始工作目录。
-- 当前安全层仍以 `workspaceRoot` 作为命令静态分析和 sandbox adapter 的 CWD；持久 Shell 的 canonical CWD 状态模型属于后续 M4 的改进范围。
+- Windows strict 使用 Docker Desktop worker，工作区挂载到容器 `/workspace`，默认网络关闭。
+- 命令超时或取消时会删除容器并终止 Docker CLI 进程树。
+- `ShellSession` 仍作为兼容终端缓冲区保留；它不是 strict `run_command` 的安全执行环境。
+- provider-owned persistent session 仍是后续改进项，不能把当前兼容 Shell 声明为受沙箱保护的持久会话。
+
+Windows strict 配置：
+
+```powershell
+$env:SWE_SANDBOX_IMAGE="node:22-bookworm-slim"
+node dist/index.js "运行测试"
+```
+
+显式使用 best-effort 本地 adapter：
+
+```powershell
+$env:SWE_SANDBOX_MODE="best-effort"
+node dist/index.js "查看目录"
+```
 
 ## Token 用量与上下文
 
-- Agent 会估算中英文内容的 Token 占用，并结合模型 usage anchor 监测上下文预算。
-- 工具结果过大时会落盘到 `.swe-agent/session/`，上下文中只保留受限预览。
-- 达到上下文阈值时执行压缩，尽量保留用户目标、最近消息和近期文件状态。
-- 当前压缩不是完整的持久化 Transcript checkpoint；Resume/Fork 属于后续里程碑。
+- Agent 从实际 model request 投影估算 system/history/tool schema/output reserve，并以关联 request/history version/window id 的 provider usage 作为锚点。
+- hard context limit 与 auto-compact limit 分离，支持 `total` 和 `body_after_prefix` scope；同一窗口、原因和 phase 的自动尝试有熔断保护。
+- 工具结果过大时会落盘到 session transcript 根目录下的 `artifacts/<sessionId>/tool-results/`，上下文和 transcript 只保留受限预览、hash 和 durable path。
+- 达到阈值、模型 context 下调或 comp-hash 改变时，系统执行可恢复 checkpoint compaction；canonical JSONL 仍保持 append-only。
+- `AgentSession.compact()` 提供串行化 manual compact，`AgentSession.rollback(ordinal)` 追加 rollback 记录并使用同一 reconstruction contract。
 
 ## 配置说明
 
@@ -148,6 +196,12 @@ TOOL_TIMEOUT_MS=30000
 PARSE_RETRY=2
 WORKSPACE_ROOT=.
 USE_LLM_PLANNING=false
+COMPACTION_BACKEND=auto
+AUTO_COMPACT_TOKEN_LIMIT=6400
+AUTO_COMPACT_LIMIT_SCOPE=total
+COMPACTION_FALLBACK_BUFFER_TOKENS=512
+COMPACTION_TIMEOUT_MS=60000
+COMPACTION_MAX_RETRIES=2
 ```
 
 配置优先级为：内置默认值、用户级 `~/.swe-agent/config.toml`、项目级 `.swe-agent/config.toml`、`.env`/环境变量/CLI 覆盖，后者优先级最高。
@@ -166,7 +220,7 @@ npm run build
 npm run check
 ```
 
-当前基线为 38 项测试全部通过。
+当前基线为 54 项测试全部通过。
 
 ## 目录结构
 

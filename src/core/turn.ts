@@ -5,7 +5,7 @@ import type {
   ToolResult,
   Usage,
 } from "../types.js";
-import type { AgentEvent } from "./events.js";
+import type { AgentEvent, ContinueReason } from "./events.js";
 import { createCallId, type CallId, type RequestId } from "../protocol/ids.js";
 import type { ModelEvent } from "../protocol/model-events.js";
 import { Executor } from "./executor.js";
@@ -18,6 +18,7 @@ export interface StepResult {
   finalAnswerText?: string;
   usage?: Usage;
   requestId?: RequestId;
+  continueReason?: ContinueReason;
 }
 
 export interface StepOptions {
@@ -29,13 +30,19 @@ export interface StepOptions {
   ctx: AgentContext;
   parseRetry: number;
   nativeToolCalls?: boolean;
+  signal?: AbortSignal;
   onEvent?: (e: AgentEvent) => void;
+  onMessageAppended?: (message: Message) => Promise<Message | void>;
+  onToolCallStarted?: (call: { callId: CallId; name: string; input: Record<string, unknown> }) => Promise<void>;
+  onToolCallCompleted?: (call: { callId: CallId; result: ToolResult }) => Promise<ToolResult | void>;
 }
 
 export async function runStep(opts: StepOptions): Promise<StepResult> {
   const { history, parser, knownTools, executor, ctx, parseRetry, nativeToolCalls = false, onEvent } = opts;
-  let generated = await generateOnce(opts.generate, onEvent);
+  throwIfAborted(opts.signal);
+  let generated = await generateOnce(opts.generate, onEvent, opts.signal);
   let raw = generated.raw;
+  let continueReason: ContinueReason | undefined = generated.continueReason;
   let action: AgentAction | null = generated.toolCall
     ? toAction(generated.toolCall)
     : nativeToolCalls && raw.trim()
@@ -43,16 +50,18 @@ export async function runStep(opts: StepOptions): Promise<StepResult> {
       : tryParse(parser, raw, knownTools);
 
   if (action === null) {
-    history.push({ role: "assistant", content: raw, usage: generated.usage });
+    await appendMessage(history, { role: "assistant", content: raw, usage: generated.usage }, opts.onMessageAppended);
     for (let attempt = 0; attempt < parseRetry && action === null; attempt += 1) {
-      history.push({
+      throwIfAborted(opts.signal);
+      continueReason = "parse_retry";
+      await appendMessage(history, {
         role: "tool",
         name: "parser",
         content: "解析失败：请严格按约定只输出一个 JSON 对象（thought / action / action_input）。",
-      });
-      generated = await generateOnce(opts.generate, onEvent);
+      }, opts.onMessageAppended);
+      generated = await generateOnce(opts.generate, onEvent, opts.signal);
       raw = generated.raw;
-      history.push({ role: "assistant", content: raw, usage: generated.usage });
+      await appendMessage(history, { role: "assistant", content: raw, usage: generated.usage }, opts.onMessageAppended);
       action = generated.toolCall
         ? toAction(generated.toolCall)
         : nativeToolCalls && raw.trim()
@@ -60,31 +69,45 @@ export async function runStep(opts: StepOptions): Promise<StepResult> {
           : tryParse(parser, raw, knownTools);
     }
     if (action === null) {
-      return { action: null, raw, usage: generated.usage, requestId: generated.requestId, finalAnswerText: "连续解析失败，终止任务。" };
+      return { action: null, raw, usage: generated.usage, requestId: generated.requestId, finalAnswerText: "连续解析失败，终止任务。", continueReason };
     }
   } else {
-    history.push({
+    await appendMessage(history, {
       role: "assistant",
       content: raw,
       usage: generated.usage,
       requestId: generated.requestId,
       ...(generated.toolCall ? { toolCalls: [{ callId: generated.toolCall.callId, name: generated.toolCall.name, input: generated.toolCall.input }] } : {}),
-    });
+    }, opts.onMessageAppended);
   }
 
-  if (action.type === "final_answer") return { action, raw, usage: generated.usage, requestId: generated.requestId };
+  if (action.type === "final_answer") return { action, raw, usage: generated.usage, requestId: generated.requestId, continueReason };
 
   const callId = action.callId ?? generated.toolCall?.callId ?? createCallId();
   action = { ...action, callId };
+  await opts.onToolCallStarted?.({ callId, name: action.toolName, input: action.toolInput });
   onEvent?.({ type: "tool_use_started", toolName: action.toolName, callId });
-  const observation = await executor.execute(action, ctx, { callId, onEvent });
+  let observation = await executor.execute(action, ctx, { callId, onEvent, signal: opts.signal });
+  observation = await opts.onToolCallCompleted?.({ callId, result: observation }) ?? observation;
   onEvent?.({
     type: "tool_use_completed",
     toolName: action.toolName,
     isError: observation.isError === true,
   });
-  history.push({ role: "tool", name: action.toolName, content: observation.output, toolCallId: callId });
-  return { action, raw, observation, usage: generated.usage, requestId: generated.requestId };
+  await appendMessage(history, { role: "tool", name: action.toolName, content: observation.output, toolCallId: callId }, opts.onMessageAppended);
+  return {
+    action,
+    raw,
+    observation,
+    usage: generated.usage,
+    requestId: generated.requestId,
+    continueReason: observation.isError ? "tool_error_recoverable" : "normal",
+  };
+}
+
+async function appendMessage(history: Message[], message: Message, onAppended?: (message: Message) => Promise<Message | void>): Promise<void> {
+  const persisted = await onAppended?.(message);
+  history.push(structuredClone(persisted ?? message));
 }
 
 /** @deprecated 使用 runStep；该别名仅保留旧调用方兼容。 */
@@ -103,13 +126,17 @@ function tryParse(parser: OutputParser, raw: string, knownTools: Set<string>): A
 async function generateOnce(
   generate: () => AsyncIterable<ModelEvent>,
   onEvent?: (e: AgentEvent) => void,
-): Promise<{ raw: string; usage?: Usage; requestId?: RequestId; toolCall?: NativeToolCall }> {
+  signal?: AbortSignal,
+): Promise<{ raw: string; usage?: Usage; requestId?: RequestId; toolCall?: NativeToolCall; continueReason?: ContinueReason }> {
+  throwIfAborted(signal);
   onEvent?.({ type: "stream_start" });
   let full = "";
   let usage: Usage | undefined;
   let requestId: RequestId | undefined;
+  let continueReason: ContinueReason | undefined;
   const calls = new Map<CallId, { name: string; input?: unknown }>();
   for await (const event of generate()) {
+    throwIfAborted(signal);
     onEvent?.({ type: "model_event", event });
     switch (event.type) {
       case "response_started":
@@ -131,6 +158,9 @@ async function generateOnce(
       case "usage":
         usage = event.usage;
         break;
+      case "transport_warning":
+        if (event.recoverable) continueReason = "transport_fallback";
+        break;
       default:
         break;
     }
@@ -139,7 +169,7 @@ async function generateOnce(
   const toolCall = firstCall && firstCall[1].name
     ? { callId: firstCall[0], name: firstCall[1].name, input: firstCall[1].input ?? {} }
     : undefined;
-  return { raw: full, usage, requestId, toolCall };
+  return { raw: full, usage, requestId, toolCall, continueReason };
 }
 
 interface NativeToolCall {
@@ -153,4 +183,8 @@ function toAction(call: NativeToolCall): AgentAction {
     return { type: "tool_call", toolName: call.name, toolInput: {}, callId: call.callId };
   }
   return { type: "tool_call", toolName: call.name, toolInput: call.input as Record<string, unknown>, callId: call.callId };
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw signal.reason ?? new Error("Turn 已取消");
 }

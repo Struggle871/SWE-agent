@@ -4,10 +4,11 @@
 > 日期：2026-08-27  
 > 适用仓库：`minimal-swe-agent`  
 > 语言约束：TypeScript + `strict: true`
+> 状态说明：第 0-2 节保留 v2 立项时的历史基线，不代表 2026-09-05 的实现状态。项目发布完成口径仍截至 M3.5；工作区已有 M4/M5 原型和通过专项验证的 M6 实现，但在 M4/M5 顺序验收完成前不改写整体里程碑状态。当前状态见 [README.md](../README.md)，M6 设计与实现证据见 [m6-context-checkpoint-compaction.md](./m6-context-checkpoint-compaction.md)。
 
 ## 0. 结论先行
 
-当前项目已经有不少“名字正确”的模块，但它们大多仍是单进程 demo 级实现：`AgentSession` 虽然存在，实际仍把会话、轮次、任务、上下文和工具执行绑在一起；`StreamingToolExecutor` 目前只排队，不能消费流中的真实 tool call；`CompactionPipeline` 能压缩文本，却没有和持久化 transcript、上下文窗口、重建语义绑定；`ToolRegistry` 只有名称查找，缺少 Codex 风格的模型可见 spec、runtime、路由和生命周期；配置、权限、hooks、MCP、skills、resume、记忆和多 agent 仍未形成端到端闭环。
+本设计建立时，项目已有不少“名字正确”的模块，但它们大多仍是单进程 demo 级实现：`AgentSession` 虽然存在，实际仍把会话、轮次、任务、上下文和工具执行绑在一起；`StreamingToolExecutor` 只排队，不能消费流中的真实 tool call；`CompactionPipeline` 能压缩文本，却没有和持久化 transcript、上下文窗口、重建语义绑定；`ToolRegistry` 只有名称查找，缺少 Codex 风格的模型可见 spec、runtime、路由和生命周期；配置、权限、hooks、MCP、skills、resume、记忆和多 agent 尚未形成端到端闭环。后续 M0-M5 的完成情况不回写为本段的历史事实。
 
 v2 不再以“在现有类上继续堆功能”为目标，而是把系统重构为以下稳定边界：
 
@@ -72,7 +73,7 @@ Claude Code 核心 CLI/runtime 源码没有在公开仓库发布，本机 `C:\\U
 
 因此，本文把 Codex 源码作为可复现的控制流依据，把 Claude Code 作为兼容性目标，不声称“Claude Code 内部一定有某个未公开类”。
 
-## 2. 当前仓库审计
+## 2. v2 立项时的仓库审计（历史基线）
 
 ### 2.1 已存在但需要重构的模块
 
@@ -367,21 +368,23 @@ parse -> normalize line endings -> resolve paths -> read/hash check
 
 ## 6. 上下文与压缩
 
+M6 的完整 Codex 源码对齐、当前差距、协议模型、恢复算法和测试矩阵见 [m6-context-checkpoint-compaction.md](./m6-context-checkpoint-compaction.md)。本节只保留总览；若与专项设计冲突，以专项设计为准。
+
 ### 6.1 Canonical history
 
 `TranscriptStore` 追加 `ResponseItem`，每项有 ordinal、turnId、parent/fork lineage、createdAt 和 optional usage。 `ContextManager.forPrompt()` 只生成模型输入投影，不删除真历史。
 
-### 6.2 五级压缩流水线
+### 6.2 渐进式 context preparation 与 checkpoint compaction
 
-按成本递增执行，任一级达到目标预算就停止：
+以下有界处理用于减少 compact 输入和模型上下文，不代表前四步可以取代 checkpoint：
 
 1. **Tool result spill**：单结果超过 50,000 字符落到 session result store，模型只看 preview + 路径 + hash。
 2. **Tool result clear**：保留最近 N 个工具结果，旧结果替换为可重取引用。
 3. **History projection**：把旧 assistant/tool turn 折叠为带 turn/文件/测试信息的摘要。
-4. **Model summarization**：使用专门 summarizer 生成 `CompactionSummary`，保留用户目标、约束、已完成修改、失败尝试、待办、关键路径和最近编辑文件。
-5. **Context window rollover**：写入 `compact_checkpoint`，增加 window id，按策略重注入 AGENTS、权限、cwd、skills 和最近文件状态。
+4. **Local/remote compaction**：按 provider capability 选择专用模型 handoff summary、remote compaction 或 new-context backend，产出经过校验的 replacement history。
+5. **Context window rollover**：安装并持久化同一份 replacement history，推进 `window_number` 和 `first/previous/current window id`，随后持久化 full world-state baseline 与 reference turn context。
 
-压缩支持三个触发点：pre-turn、mid-turn token limit、显式 `/compact`。每次压缩都执行 `PreCompact` 和 `PostCompact` hooks，并写入 replacement history，resume 必须重放 checkpoint 而不是再次摘要。
+压缩支持 pre-turn、mid-turn token limit 和显式 manual compact。pre-turn/manual 成功后清除旧 reference context并在下一普通turn全量重注入；mid-turn必须把当前canonical initial context放在最后真实用户消息之前，保证summary/compaction item仍是末项。每次压缩都执行可阻断的生命周期、写入完整replacement history和window lineage；Resume/Fork/rollback从最新surviving checkpoint重放，绝不再次摘要。
 
 ### 6.3 Token budget
 
@@ -389,6 +392,7 @@ parse -> normalize line endings -> resolve paths -> read/hash check
 - 分开 `contextWindowLimit`、`autoCompactLimit`、`maxOutputTokens`、`rolloutBudget` 和 `toolResultBudget`。
 - 预算计算必须包括 system/developer instructions、tool schema、skills、MCP spec、图片 token 和 pending input。
 - 记录预估值和服务端值的误差；连续超估时降低安全余量，不能静默发送超限请求。
+- token status 同时维护模型 hard context limit、auto-compact limit、`total|body_after_prefix` scope、当前窗口 prefill 和有界 fallback buffer；压缩后旧 usage anchor 必须失效并重算。
 
 ## 7. 安全与权限
 
@@ -475,19 +479,45 @@ pending -> blocked (blockedBy 未完成)
 
 ## 10. 持久化、resume、fork 和记忆
 
-### 10.1 Rollout 三层
+### 10.1 Rollout 三层与里程碑边界
 
 1. **L1 JSONL**：单写者 append-only，记录 session meta、turn、response item、tool result、approval、compact、task、hook 和 audit event；这是唯一真源。
 2. **L2 SQLite**：session index、任务索引、文件变更、记忆和搜索索引；可删除并重建。
 3. **L3 trace**：模型请求/响应、tool timing、token/cost、span，敏感内容按 policy 脱敏。
 
-写入要求：原子 append、顺序 ordinal、fsync 策略、崩溃后尾部修复、版本化 schema 和迁移测试。
+里程碑分工如下：
+
+- **M5 规划 L1 的最小闭环**：session 级 canonical Transcript、单进程单 writer、版本化 envelope、顺序 ordinal、flush/shutdown、尾部修复、reconstruction、Resume、copied Fork 和可重建 JSON index。
+- **M5 只注册未来事件类型**：`compact`、`task`、`hook`、`trace` 等 kind 可以进入 schema，但生产逻辑分别由 M6-M10 接入。
+- **M6-M9 扩展 L1/L2**：持久化 context checkpoint、任务图、hooks/MCP、queue/mailbox，以及更丰富的 lineage 和 metadata 投影。
+- **M10 再引入 L2/L3 优化**：SQLite 查询索引、trace/metrics、归档与检索优化；它们不得反过来成为 M5 Resume 的依赖。
+
+写入要求：原子 append、顺序 ordinal、fsync 策略、崩溃后尾部修复、版本化 schema 和迁移测试。durable item 必须与 transient UI/model delta 分离；M5 只保证单进程 writer，跨进程锁和 reservation 留到后续阶段。
 
 ### 10.2 Resume/reconstruction
 
-`reconstruction.ts` 从最新有效 checkpoint 向前/向后 replay：处理 compact window、rollback、fork parent、pending approval、active task、world state 和历史替换。恢复后必须重新计算 context projection，并向模型重注入当前有效 instructions；不能直接把旧 prompt 当作真相。
+M5 的 `reconstruction.ts` 设计先处理 session meta、turn 生命周期、user/assistant/tool item、approval 状态和未完成工具；从最新有效事件重建可继续的 session，并对未确认副作用标记 `unknown_outcome`，禁止自动 replay。M5 的 fork 规划采用 copied history + parent boundary。现有原型不能替代完整里程碑验收。
 
-### 10.3 记忆
+后续阶段再加入 checkpoint window、rollback、reference/paginated fork、active task graph、world-state fingerprint 和历史替换。恢复后必须重新计算 context projection，并向模型重注入当前有效 instructions；不能直接把旧 prompt 当作真相。
+
+### 10.3 Codex 存储能力的延期清单
+
+以下能力属于 Codex 存储系统，但不属于 M5 的交付物；对应里程碑只是规划，不代表已经实现：
+
+| 能力 | 计划阶段 | 延期原因/前置条件 |
+|---|---|---|
+| reference/paginated fork、`history_base`、byte/ordinal offset | M8-M10 | 需要稳定 lineage、分页读取和 materialization 策略；M5 先用 copied fork |
+| SQLite session/task/file projection | M10 | JSONL 规模和查询模式明确后再优化；必须可删除并重建 |
+| archive/unarchive/delete/revert 与源 rollout 保护 | M9-M10 | 需要引用计数、归档策略和 destructive action 审计 |
+| 跨进程 writer lock、lifecycle reservation、stale writer 清理 | M8-M10 | M5 只保证单进程单 writer，先验证顺序与崩溃语义 |
+| queue、approval/input mailbox 的持久化 | M8-M9 | 依赖任务图、hooks/MCP 和多 agent 生命周期 |
+| rollout 压缩、materialization、reverse scanner、schema migration | M6-M10 | 需要 checkpoint 格式、迁移版本和大历史性能基线 |
+| L3 trace、token/cost/span 与敏感数据 policy | M10 | 与可观测性和 provider 指标一起设计，避免重复事件模型 |
+| stale index repair、lineage repair、引用保护 | M9-M10 | 依赖完整 index/projection 和 fork 引用语义 |
+
+这份清单是设计约束：后续实现可以扩展 M5 的 schema 和 store API，但不能绕过 JSONL 真源，或把派生索引当成唯一历史。
+
+### 10.4 记忆
 
 - 分类：`user`、`feedback`、`project`、`reference`；feedback 记录 Why + How to apply。
 - Phase 1 异步抽取候选，Phase 2 合并去重并写 SQLite；`MEMORY.md`/summary 是派生索引。
@@ -539,7 +569,7 @@ handler 类型：command、prompt、agent、HTTP、in-process callback。每个 
 ### P0：正确性和安全
 
 1. protocol item/event、唯一 SessionCoordinator、TurnRunner、AbortSignal。
-2. transcript JSONL + reconstruction 最小闭环。
+2. M5 transcript JSONL + reconstruction、Resume、copied Fork 最小闭环。
 3. ToolRouter/Registry/Executor 三层，schema 校验、read/write gate。
 4. `edit_file` hash 校验、`apply_patch` parse/verify/atomic apply。
 5. permission profile、approval broker、canonical path、shell static checks。
@@ -552,7 +582,7 @@ handler 类型：command、prompt、agent、HTTP、in-process callback。每个 
 1. AGENTS/CLAUDE 分层 provenance、skills、hooks preview/run。
 2. 任务图、依赖、重试、持久化；子 agent mailbox 和 fork。
 3. MCP client、dynamic tool、deferred exposure/tool search。
-4. SQLite session index、resume/fork、trace 和结构化 metrics。
+4. SQLite session index、reference/paginated fork、trace 和结构化 metrics。
 
 验收：可从任意 rollout resume；hook 能 block/rewrite/continue；子 agent 结果和文件 delta 可审计；MCP 断线只影响对应工具。
 

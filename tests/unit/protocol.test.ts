@@ -6,6 +6,7 @@ import { FakeModelClient } from "../../src/model/model-client.js";
 import { LegacyModelTransportAdapter } from "../../src/model/transport.js";
 import type { Message, ModelClient } from "../../src/types.js";
 import type { ModelRequest } from "../../src/protocol/model-events.js";
+import { InputQueue } from "../../src/core/input-queue.js";
 
 test("branded protocol ids validate at runtime and call ids are unique", () => {
   const first = createCallId();
@@ -49,4 +50,14 @@ test("legacy chat-only models are converted to the M2 event protocol", async () 
 test("AgentError remains a discriminated, non-string control value", () => {
   assert.equal(isAgentError({ kind: "permission", recoverable: true, message: "denied", callId: asCallId("call-1") }), true);
   assert.equal(isAgentError(new Error("denied")), false);
+});
+
+test("input queue takes shutdown and approval messages before ordinary input", () => {
+  const queue = new InputQueue<string>();
+  queue.push("user_input", "user");
+  queue.push("approval_result", "approval");
+  queue.push("shutdown", "shutdown");
+  assert.equal(queue.take()?.value, "shutdown");
+  assert.equal(queue.take()?.value, "approval");
+  assert.equal(queue.take()?.value, "user");
 });

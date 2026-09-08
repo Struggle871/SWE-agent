@@ -15,5 +15,7 @@ test("persists large tool results and returns a bounded preview", async (t) => {
   ], { budgetTokens: 100 });
   assert.equal(result.report.persistedToolResults, 1);
   assert.match(result.messages[1].content, /Full output saved/);
-  assert.equal(await fs.readFile(path.join(root, "session", "tool-results", "message-1.txt"), "utf8"), "0123456789abcdef");
+  const persistedPath = result.messages[1].content.match(/Full output saved to: (.+)/)?.[1];
+  assert.ok(persistedPath);
+  assert.equal(await fs.readFile(persistedPath, "utf8"), "0123456789abcdef");
 });

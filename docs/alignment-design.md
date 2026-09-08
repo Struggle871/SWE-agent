@@ -299,90 +299,37 @@ export class StreamingToolExecutor {
 
 ---
 
-### 4.2 多级上下文压缩流水线
+### 4.2 M6 上下文 checkpoint 与压缩
 
-**目标**：替换 `prompt-builder.ts` 中「丢弃最早消息」的 `truncateHistory`，实现「渐进式、可恢复」的压缩，并引入基于 API usage 锚点的精准 token 估算。
+> 本节原有“四级简化流水线”只描述了 Phase 2 的内存压缩原型，不能作为 M6 实现方案。M6 必须对齐 Codex 的 context-window、replacement-history 和 rollout reconstruction 语义，不接受先交付字符串摘要或截断历史、再延期补齐 checkpoint 的做法。完整源码证据、差距、协议、恢复算法、失败模型和测试矩阵见 [m6-context-checkpoint-compaction.md](./m6-context-checkpoint-compaction.md)；若本早期设计稿与专项设计冲突，以专项设计为准。
 
-**对齐来源**：Claude Code 5 级流水线；Codex pre-turn/mid-turn compaction。
+**目标**：canonical Transcript 保持 append-only；压缩只替换当前模型可见投影，并把完整 `replacement_history`、窗口 lineage、world-state baseline 和 reference turn context 作为可恢复 checkpoint 持久化。
 
-#### 4.2.1 五级流水线（裁剪为可落地的四级）
+**对齐来源**：本地 `openai/codex` 源码中的 `session/turn.rs`、`session/context_window.rs`、`compact.rs`、`compact_remote.rs`、`compact_remote_v2.rs`、`compact_token_budget.rs`、`session/rollout_reconstruction.rs` 及 compact 集成测试。
 
-```ts
-// src/core/context/compaction-pipeline.ts
-export class CompactionPipeline {
-  constructor(
-    private storage: ToolResultStorage,        // 大结果落盘
-    private summarizer: CompactionSummarizer,  // 子 Agent 摘要（可选）
-  ) {}
+#### 4.2.1 不可裁剪的 M6 语义
 
-  async compact(
-    messages: Message[],
-    opts: { budgetTokens: number; systemTokens: number; recentFiles: string[] },
-  ): Promise<{ messages: Message[]; report: CompactionReport }> {
-    let m = messages;
-    // L1 工具大结果落盘（零 API 成本，纯本地）
-    m = await this.applyToolResultBudget(m);
-    // L2 旧工具结果清理（microcompact 简化版：保留最近 N 轮）
-    m = this.clearOldToolResults(m, { keepRecent: 3 });
-    // L3 折叠（只读投影，保留原文可展开）
-    m = this.collapseIdleTurns(m, { thresholdTurns: 10 });
-    // L4 摘要（最后手段，调用模型）
-    if (estimateTokens(messagesToText(m)) > opts.budgetTokens) {
-      m = await this.summarizer.summarize(m, opts);
-    }
-    // 恢复最近编辑的文件，防止模型遗忘当前工作
-    this.restoreRecentFiles(m, opts.recentFiles);
-    return { messages: m, report: this.buildReport() };
-  }
-}
-```
+1. **统一 history 所有权**：`SessionCoordinator` 持有唯一 `ContextManager`；`TurnRunner` 不得在局部克隆上形成第二份 history 真相。
+2. **三类触发完整落地**：pre-turn、mid-turn 和 manual compact 使用同一生命周期与安装协议；mid-turn 压缩后继续同一 turn，不能重复已经执行的工具副作用。
+3. **capability 驱动的 backend**：local model summary、remote compact/v2 和 token-budget new-context 统一产出并校验 replacement history。deterministic string join 只能是测试 fixture。
+4. **窗口与 context 身份**：从 session 建立起持久化初始 window id；checkpoint 推进 `window_number`，并记录 first/previous/current window id、触发原因、实现方式、模型与 compatibility hash。
+5. **可恢复安装**：backend 成功且 replacement 校验通过后，先 durable append checkpoint，再切换 live projection并提交预计算的window lineage；pre-commit失败、中断或checkpoint写入失败不能改变旧history和窗口。该durable-before-live规则是本项目基于M5 writer失败模型增加的强化，不是对上游Codex当前写入顺序的误述。
+6. **checkpoint-aware replay**：Resume、Fork 和 rollback 从最新 surviving checkpoint 的 replacement history 开始正向重放后缀，不再次调用 summarizer，也不截断 canonical Transcript。
+7. **world state 重注入**：pre-turn/manual 在下一普通 turn 全量重注入；mid-turn 将当前 canonical initial context 放在最后真实用户消息之前。旧 developer/context wrapper 不能从 remote replacement 原样复活。
+8. **完整请求预算**：hard context limit、auto-compact limit、max output、tool schema、system/developer instructions、skills、MCP、图片和 pending input 都进入 token status；usage 必须关联 request/history version/window，压缩后重建 prefill/anchor。
+9. **结构和上限**：tool/function call 与 output 成对保留或移除；tool result 在进入 canonical history 前完成 session-scoped、content-addressed spill，checkpoint 单 item 和总 payload 都有硬上限。
+10. **有界失败处理**：覆盖取消、超时、transient retry、compact-request overflow、无效replacement、checkpoint/baseline write failure、reconstruction failure和no-progress熔断，禁止同一状态无限compact；`PostCompact`停止不得回滚已提交checkpoint。
 
-#### 4.2.2 工具大结果落盘 + 预览引用
+#### 4.2.2 与后续里程碑的边界
 
-对齐 Claude Code `applyToolResultBudget`（阈值 50K 字符、落盘、2KB 预览、会话恢复一致替换）。
+- M7 才实现完整 Skills 和分层 AGENTS 加载，但 M6 的 world-state schema 必须已经容纳这些 section 与 fingerprint。
+- M9 才实现通用 Hooks runtime 和 MCP runtime，但 M6 必须提供可阻断的 compaction lifecycle 调用点、durable 结果状态和 MCP resource-origin 扩展字段。
+- reference/paginated Fork 可后续优化；M6 的 copied Fork 与 eager replay 必须先保证与 Resume 相同的 checkpoint 投影语义。
+- SQLite 和 trace 是派生层，不能成为 checkpoint 恢复依赖。
 
-```ts
-// src/core/context/tool-result-storage.ts
-const DEFAULT_MAX_RESULT_SIZE_CHARS = 50_000;
+#### 4.2.3 验收底线
 
-export class ToolResultStorage {
-  constructor(private sessionDir: string) {}
-
-  async persistIfLarge(toolName: string, callId: string, output: string): Promise<string> {
-    if (output.length <= DEFAULT_MAX_RESULT_SIZE_CHARS) return output;
-    const file = path.join(this.sessionDir, "tool-results", `${callId}.txt`);
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(file, output, "utf8");
-    const preview = output.slice(0, 2_000);
-    return [
-      "<persisted-output>",
-      `Output too large (${output.length} chars). Full output saved to: ${file}`,
-      "",
-      `Preview (first 2KB):`,
-      preview,
-      "</persisted-output>",
-    ].join("\n");
-  }
-}
-```
-
-#### 4.2.3 精准 token 估算（usage 锚点）
-
-```ts
-// src/core/context/token-estimator.ts
-// 每条 assistant 消息缓存服务端 usage；从末尾向前找最近锚点
-export function tokenCountWithAnchor(messages: Message[]): number {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const usage = getUsage(messages[i]); // 从模型响应元数据读取
-    if (usage) {
-      return usage.totalTokens + roughTokenCount(messages.slice(i + 1));
-    }
-  }
-  return roughTokenCount(messages); // 无锚点时纯估算
-}
-```
-
-**集成点**：`model-client` 在 `chat/stream` 返回时把 `usage` 挂到 assistant 消息的 `usage` 字段（扩展 `Message` 类型加 `usage?: Usage`）。
+M6 只有在 pre/mid/manual compact、第二次 compact、Resume、Fork、跨 checkpoint replay、backend parity、token accounting、取消/超时/重试/溢出、崩溃与写入失败都具有对应测试后才能标记完成。FakeModel 只证明协议和故障注入；真实 request shape、流式 usage、provider retry 和 remote compact parity 使用 mock HTTP/SSE 验证。
 ---
 
 ### 4.3 Search-and-Replace 编辑工具与 apply_patch
@@ -781,6 +728,8 @@ export class TaskStore {
 
 **目标**：会话事件落盘，支持 `--resume` 与崩溃恢复；trace 可诊断。
 
+> 分期说明：本文件是早期设计稿；M5 的实际边界、Codex 存储能力延期清单和验收契约以 [alignment-design-v2.md](./alignment-design-v2.md) 与 [m5-transcript-resume-fork.md](./m5-transcript-resume-fork.md) 为准。M5 先实现 JSONL canonical transcript、reconstruction、Resume、copied Fork 和可重建轻量索引。
+
 **对齐来源**：Codex 三层持久化（rollout JSONL + SQLite 索引 + trace）。
 
 #### 4.9.1 设计（单进程起步，JSONL 单真源）
@@ -806,7 +755,7 @@ export class RolloutRecorder {
 
 **Resume**：`index.ts` 增加 `--resume <sessionId>`，从 rollout 重建 `history`/`taskTrace`，注入「中断 marker」（对齐 Codex `InterruptedTurnHistoryMarker`），继续 `AgentSession.run`。
 
-**SQLite 索引（P2）**：多会话列表/检索时引入 `node:sqlite`（Node 22+）做查询索引，JSONL 仍是真源。
+**SQLite 索引（后续阶段，当前规划为 M10）**：多会话列表/检索时再引入 `node:sqlite`（Node 22+）做查询索引；JSONL 始终是真源，SQLite 可删除并重建，不是 M5 Resume 的前置依赖。
 
 ---
 

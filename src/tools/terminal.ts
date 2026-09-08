@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { JsonSchema, ShellResult, ToolResult } from "../types.js";
+import { createSandboxProfile } from "../security/sandbox.js";
 import type { Tool, RuntimeExecuteOptions } from "./types.js";
 
 interface ShellSpec {
@@ -227,7 +228,7 @@ const runCommandSchema: JsonSchema = {
 
 export const runCommandTool: Tool = {
   name: "run_command",
-  description: "在持久终端会话中执行一条命令，并返回输出与退出码（cd/环境变量等状态会保留）",
+  description: "在当前沙箱 provider 控制的执行环境中运行一条命令，并返回输出与退出码",
   parameters: runCommandSchema,
   async execute(input, ctx, options?: RuntimeExecuteOptions): Promise<ToolResult> {
     const command = String(input.command ?? "");
@@ -239,6 +240,11 @@ export const runCommandTool: Tool = {
           cwd: ctx.workspaceRoot,
           timeoutMs,
           signal: options?.signal,
+          profile: createSandboxProfile(
+            ctx.workspaceRoot,
+            timeoutMs,
+            ctx.sandboxProvider?.capabilities().enforcement === "container" ? "required" : "best_effort",
+          ),
           requirements: { filesystem: "workspace", network: false, subprocess: true, workingDirectory: true, environment: "filtered", timeout: true, cancellation: true },
         })
       : await ctx.shell.run(command, timeoutMs);
@@ -255,7 +261,7 @@ export const runCommandTool: Tool = {
 export const readTerminalOutputTool: Tool = {
   name: "read_terminal_output",
   isReadOnly: true,
-  description: "读取终端会话缓冲区中尚未被消费的输出（例如后台任务的输出）",
+  description: "读取兼容终端会话缓冲区中尚未被消费的输出",
   parameters: {
     type: "object",
     properties: {

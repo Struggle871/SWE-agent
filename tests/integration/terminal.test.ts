@@ -23,3 +23,14 @@ test("shell timeout returns an explicit error and the session can execute again"
   assert.equal(next.isError, false);
   assert.match(next.output, /ok/);
 });
+
+test("command execution audit records the selected sandbox guarantees", async (t) => {
+  const ctx = await makeContext(await makeWorkspace());
+  t.after(() => cleanupContext(ctx));
+  const result = await new Executor().execute({ type: "tool_call", toolName: "run_command", toolInput: { command: "echo audited" } }, ctx);
+  assert.equal(result.isError, false);
+  const execution = ctx.auditTrail.list().find((record) => record.phase === "execution" && record.toolName === "run_command" && record.success === true);
+  assert.equal(execution?.sandbox?.provider, process.platform);
+  assert.equal(execution?.sandbox?.actualEnforcement, "best_effort");
+  assert.equal(execution?.sandbox?.requestedNetwork, "deny");
+});

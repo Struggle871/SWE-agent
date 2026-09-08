@@ -29,6 +29,28 @@ export interface ModelCapabilities {
   streamingText: boolean;
   usage: boolean;
   reasoningDeltas: boolean;
+  remoteCompaction?: "unsupported" | "v1" | "v2";
+}
+
+export interface RemoteCompactionRequest {
+  requestId: RequestId;
+  implementation: "remote_compact" | "remote_compaction_v2";
+  model: string;
+  input: readonly ModelMessage[];
+  instructions: string;
+  tools: readonly ModelToolDefinition[];
+  parallelToolCalls: boolean;
+  maxOutputTokens: number;
+  promptCacheKey?: string;
+  serviceTier?: string;
+  reasoning?: Record<string, unknown>;
+}
+
+export interface RemoteCompactionResult {
+  replacement: readonly ModelMessage[];
+  usage?: Usage;
+  responseId?: string;
+  metadata?: readonly (Record<string, unknown> | undefined)[];
 }
 
 export type ModelEvent =
@@ -45,6 +67,7 @@ export type ModelEvent =
 export interface ModelTransport {
   stream(request: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent>;
   capabilities(): ModelCapabilities;
+  compact?(request: RemoteCompactionRequest, signal: AbortSignal): Promise<RemoteCompactionResult>;
 }
 
 export const legacyModelCapabilities: ModelCapabilities = {

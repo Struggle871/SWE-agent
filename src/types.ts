@@ -10,6 +10,7 @@ import type { SandboxProvider } from "./security/sandbox.js";
 import type { ModelTransport } from "./protocol/model-events.js";
 import type { CallId, RequestId, SessionId, StepId, TurnId } from "./protocol/ids.js";
 import type { Usage as ProtocolUsage } from "./protocol/usage.js";
+import type { TurnTerminalReason } from "./core/events.js";
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
@@ -23,6 +24,23 @@ export interface Message {
   requestId?: RequestId;
   toolCalls?: Array<{ callId: CallId; name: string; input: unknown }>;
   toolCallId?: CallId;
+}
+
+export type CompactionBackendPreference = "auto" | "local" | "remote" | "remote_v2" | "new_context";
+export type AutoCompactTokenLimitScope = "total" | "body_after_prefix";
+
+export interface CompactionConfig {
+  backend: CompactionBackendPreference;
+  autoCompactTokenLimit: number;
+  limitScope: AutoCompactTokenLimitScope;
+  fallbackBufferTokens: number;
+  timeoutMs: number;
+  maxRetries: number;
+  maxRetainedUserTokens: number;
+  maxCheckpointItems: number;
+  maxCheckpointBytes: number;
+  maxItemBytes: number;
+  prompt?: string;
 }
 
 export interface ToolResult {
@@ -62,6 +80,7 @@ export interface AgentStep {
   stepId?: StepId;
   requestId?: RequestId;
   usage?: Usage;
+  continueReason?: import("./core/events.js").ContinueReason;
 }
 
 export interface Task {
@@ -114,6 +133,7 @@ export interface AgentConfig {
   model: { baseUrl: string; apiKey?: string; model: string };
   useFakeModel: boolean;
   useLlmPlanning: boolean;
+  compaction?: Partial<CompactionConfig>;
 }
 
 export type ModelStreamEvent =
@@ -140,4 +160,5 @@ export interface AgentRunResult {
   taskTrace: AgentStep[];
   sessionId?: SessionId;
   turnId?: TurnId;
+  terminalReason?: TurnTerminalReason;
 }

@@ -1,7 +1,23 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ApprovalResult } from "./approval-broker.js";
+import type { SandboxEnforcement, SandboxNetworkMode } from "./sandbox.js";
 import type { ToolDecision, ToolExecutionPreview } from "../tools/preview.js";
+
+export interface SandboxAudit {
+  provider: string;
+  profileFingerprint: string;
+  requestedEnforcement: SandboxEnforcement;
+  actualEnforcement: SandboxEnforcement;
+  requestedNetwork: SandboxNetworkMode;
+  actualNetwork: "deny" | "allow";
+  requestedReadRoots: string[];
+  requestedWriteRoots: string[];
+  filesystemEnforced: boolean;
+  networkEnforced: boolean;
+  processTreeTracked: boolean;
+  degraded: boolean;
+}
 
 export interface AuditRecord {
   timestamp: number;
@@ -16,6 +32,7 @@ export interface AuditRecord {
   error?: string;
   beforeHashes?: Record<string, string | null>;
   afterHashes?: Record<string, string | null>;
+  sandbox?: SandboxAudit;
 }
 
 export class AuditTrail {

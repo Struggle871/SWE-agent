@@ -1,6 +1,10 @@
 import type { ChatOptions, Message, ModelClient, ModelStreamEvent, Usage } from "../types.js";
 import { createCallId, asCallId, type CallId } from "../protocol/ids.js";
-import type { ModelCapabilities, ModelEvent, ModelRequest, ModelTransport } from "../protocol/model-events.js";
+import type {
+  ModelCapabilities, ModelEvent, ModelMessage, ModelRequest, ModelTransport,
+  RemoteCompactionRequest, RemoteCompactionResult,
+} from "../protocol/model-events.js";
+import { normalizeUsage } from "../protocol/usage.js";
 import { LegacyModelTransportAdapter } from "./transport.js";
 import { parseOpenAIChatSse } from "./openai-sse.js";
 
@@ -156,7 +160,59 @@ class OpenAIChatModelTransport implements ModelTransport {
   constructor(private readonly opts: { baseUrl: string; apiKey?: string; model: string }) {}
 
   capabilities(): ModelCapabilities {
-    return { nativeToolCalls: true, streamingText: true, usage: true, reasoningDeltas: false };
+    return {
+      nativeToolCalls: true, streamingText: true, usage: true, reasoningDeltas: false,
+      // Explicit remote configuration may use compact(); auto selection stays local
+      // because generic OpenAI-compatible chat providers may not expose this endpoint.
+      remoteCompaction: "unsupported",
+    };
+  }
+
+  async compact(request: RemoteCompactionRequest, signal: AbortSignal): Promise<RemoteCompactionResult> {
+    if (request.implementation === "remote_compaction_v2") {
+      throw new Error("当前 OpenAI Chat transport 不支持 Responses streaming compaction v2");
+    }
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.opts.apiKey) headers.authorization = `Bearer ${this.opts.apiKey}`;
+    const body = JSON.stringify({
+      model: request.model,
+      input: request.input,
+      instructions: request.instructions,
+      tools: request.tools.map((tool) => ({
+        type: "function", name: tool.name, description: tool.description, parameters: tool.parameters,
+      })),
+      parallel_tool_calls: request.parallelToolCalls,
+      ...(request.promptCacheKey ? { prompt_cache_key: request.promptCacheKey } : {}),
+      ...(request.serviceTier ? { service_tier: request.serviceTier } : {}),
+      ...(request.reasoning ? { reasoning: request.reasoning } : {}),
+    });
+    const response = await fetch(this.opts.baseUrl.replace(/\/+$/, "") + "/responses/compact", {
+      method: "POST", headers, body, signal,
+    });
+    if (!response.ok) throw new Error(`remote compaction 失败 (${response.status}): ${await response.text()}`);
+    const value: unknown = await response.json();
+    if (!value || typeof value !== "object" || !Array.isArray((value as { output?: unknown }).output)) {
+      throw new Error("remote compaction 响应缺少 output");
+    }
+    const data = value as {
+      id?: string;
+      output: unknown[];
+      usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number; cached_input_tokens?: number };
+    };
+    const converted = data.output.map(convertCompactItem);
+    return {
+      replacement: converted.map((item) => item.message),
+      metadata: converted.map((item) => item.metadata),
+      ...(data.id ? { responseId: data.id } : {}),
+      ...(data.usage ? {
+        usage: normalizeUsage({
+          inputTokens: data.usage.input_tokens,
+          outputTokens: data.usage.output_tokens,
+          totalTokens: data.usage.total_tokens,
+          cachedInputTokens: data.usage.cached_input_tokens,
+        }),
+      } : {}),
+    };
   }
 
   async *stream(request: ModelRequest, signal: AbortSignal): AsyncIterable<ModelEvent> {
@@ -237,6 +293,45 @@ class OpenAIChatModelTransport implements ModelTransport {
       yield event;
     }
   }
+}
+
+function convertCompactItem(value: unknown): { message: ModelMessage; metadata: Record<string, unknown> } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("remote compaction output item 无效");
+  const item = value as Record<string, unknown>;
+  const metadata = {
+    providerType: typeof item.type === "string" ? item.type : "message",
+    ...(typeof item.id === "string" ? { providerId: item.id } : {}),
+  };
+  if (item.type === "function_call") {
+    const name = typeof item.name === "string" ? item.name : "";
+    const callId = typeof item.call_id === "string" ? asCallId(item.call_id) : createCallId();
+    let input: unknown = {};
+    if (typeof item.arguments === "string") {
+      try { input = JSON.parse(item.arguments); } catch { input = { raw: item.arguments }; }
+    }
+    return { message: { role: "assistant", content: "", toolCalls: [{ callId, name, input }] }, metadata };
+  }
+  if (item.type === "function_call_output") {
+    if (typeof item.call_id !== "string") throw new Error("remote function_call_output 缺少 call_id");
+    return {
+      message: { role: "tool", content: textContent(item.output), toolCallId: asCallId(item.call_id) },
+      metadata,
+    };
+  }
+  const role = item.role === "assistant" || item.role === "system" || item.role === "tool" ? item.role : "user";
+  return { message: { role, content: textContent(item.content) }, metadata };
+}
+
+function textContent(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map((part) => {
+      if (typeof part === "string") return part;
+      if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") return (part as { text: string }).text;
+      return "";
+    }).join("");
+  }
+  return value === undefined ? "" : JSON.stringify(value);
 }
 
 class FakeModelTransport implements ModelTransport {

@@ -2,8 +2,9 @@
 
 > 日期：2026-08-27  
 > 基准设计：[alignment-design-v2.md](./alignment-design-v2.md)  
-> 适用状态：Phase 1、Phase 2 已形成原型，Phase 3 只完成部分编辑安全能力  
+> 当前状态：Phase 3 发布完成口径截至 M3.5；M4/M5 有工作区原型但仍处于规划/验收中；M6 工作区实现已通过专项验证，但不跳级标记为已发布
 > 目标：把当前 demo 逐步演进为可测试、可审计、可恢复、可扩展的 TypeScript SWE Agent
+> 基线说明：第 1 节保留 2026-08-27 立项时的审计快照，不代表当前实现；当前能力以 [README.md](../README.md) 和源码测试为准，M6 以 [m6-context-checkpoint-compaction.md](./m6-context-checkpoint-compaction.md) 为准。
 
 ## 0. 如何使用这份规划
 
@@ -23,11 +24,11 @@ npm test
 
 这份规划中的时间按一名开发者全职计算。若以学习为主、每天投入两到三小时，日历时间建议乘以二到三倍。
 
-## 1. 当前阶段判断
+## 1. 规划立项时的阶段判断（历史基线）
 
-### 1.1 当前可以工作的能力
+### 1.1 当时可以工作的能力
 
-当前代码已经能够完成一条最小 Agent 链路：
+当时代码已经能够完成一条最小 Agent 链路：
 
 ```text
 用户请求
@@ -52,7 +53,7 @@ npm test
 - 已有大工具结果落盘、usage 锚点和四级上下文压缩雏形。
 - 已有简化的分层配置、`AGENTS.md`/`CLAUDE.md` 注入。
 
-### 1.2 当前不能宣称已完成的能力
+### 1.2 当时不能宣称已完成的能力
 
 以下模块只有类型、注释或局部代码，不能视为完整能力：
 
@@ -70,7 +71,7 @@ npm test
 - 没有自动化测试目录和 `npm test`。
 - 当前目录没有 `.git`，无法形成可靠的小步提交和回滚基线。
 
-### 1.3 当前准确阶段
+### 1.3 当时的准确阶段
 
 建议把项目标记为：
 
@@ -654,9 +655,20 @@ runtime 执行顺序固定为：
 -> 资源和退出状态审计
 ```
 
-Sandbox 至少表达文件系统、网络、子进程、工作目录、环境变量和超时限制。Windows 和 Unix 通过 adapter 接入平台能力，不在 TypeScript 中复制完整操作系统沙箱实现。
+Sandbox 至少表达文件系统、网络、子进程、工作目录、环境变量和超时限制。近期只在 Windows 完成真实隔离，macOS/Linux 后端延期；不在 TypeScript 中复制完整操作系统沙箱实现。
 
 平台不支持所需隔离能力时，必须明确降级为 `ask` 或 `deny`，不得静默使用无限制 Shell。用户批准只表示接受展示的风险，不得绕过 sandbox 的硬限制。
+
+#### 6.7.3.1 近期范围：Windows 单平台安全闭环
+
+近期不同时实现三个操作系统的 provider。目标收敛为：
+
+- Windows CLI 默认使用 `WindowsDockerSandboxProvider`，以 Docker Desktop worker 提供容器级文件系统、网络和进程边界。
+- 固定使用 `network=none`、只挂载 workspace、只读 rootfs、丢弃 capabilities、`no-new-privileges`、pids limit 和最小环境。
+- Docker 镜像使用 `--pull=never`，避免执行任务时隐式拉取镜像；Docker 不可用或镜像不存在时直接失败。
+- `SWE_SANDBOX_MODE=best-effort` 只用于显式本地开发/协议测试，不得作为 strict 默认回退。
+- 非 Windows 当前使用不可用 provider；macOS/Linux 的 Seatbelt、Landlock/bubblewrap 等后端延期，不建立未实现的空壳。
+- Windows native ACL/restricted-token/WFP 和 Job Object 独立资源 provider 作为后续增强；Job Object 不能单独宣称文件或网络隔离。
 
 ### 6.7.4 M3.5 测试与完成标准
 
@@ -670,6 +682,8 @@ Sandbox 至少表达文件系统、网络、子进程、工作目录、环境变
 - M1 的审批后复检仍然在 sandbox 执行前生效。
 
 M3.5 完成标志是：`CommandAnalyzer` 已由字符串正则筛选器升级为按 Shell adapter 解析的结构化分析器；工具调用在受限 runtime 中执行；没有 sandbox 能力时系统按策略明确降级；M0/M1 测试全部继续通过。
+
+Windows 安全闭环阶段的完成标志是：strict provider 的能力声明与 Docker 启动参数一致；workspace 以外的宿主机路径未被挂载；默认网络关闭；敏感环境变量不进入容器；超时/取消后容器被清理；Docker 不可用时不回退到裸 Shell；真实边界测试在 Windows Docker Desktop 环境中单独执行。
 
 ## 7. M4：在稳定安全执行模型上实现 Session 和 Turn 状态机
 
@@ -765,7 +779,15 @@ created
 
 预计：5 到 8 个开发日。
 
-目标：使进程崩溃或用户退出后可以继续，而不是只保留内存数组。
+当前状态：已实现，详细实现记录见 [m5-implementation.md](./m5-implementation.md)；本节的后续延期项仍按规划执行。
+
+目标：使进程崩溃或用户退出后可以继续，而不是只保留内存数组。M5 对齐 Codex 的核心持久化不变量，但不复制 Codex 当前所有存储扩展；完整分期见 [m5-transcript-resume-fork.md](./m5-transcript-resume-fork.md)。
+
+M5 的边界必须保持清晰：
+
+- **M5 必须实现**：单 session 单写者的 append-only JSONL Transcript、版本化事件 envelope、尾部损坏恢复、session 级 reconstruction、Resume、不可变父历史的 copied Fork，以及可删除后重建的轻量索引。
+- **M5 只预留 schema**：task、hook、compact、trace 等事件可以定义 kind 和关联字段，但它们的生产者仍由 M6-M10 负责；M5 不提前实现这些模块。
+- **M5 不实现**：SQLite 查询投影、reference/paginated fork、archive/delete/revert、跨进程 writer lock、队列/邮箱持久化、rollout 压缩与迁移、L3 trace 和高级 lineage 修复。这些能力必须记录在后续里程碑中，不能被 M5 完成标准隐含带入。
 
 ### 8.1 JSONL 唯一真源
 
@@ -791,6 +813,13 @@ src/persistence/
 - parent/fork lineage。
 
 使用单写者队列，禁止多个模块直接写文件。
+
+写入协议还必须明确：
+
+- durable transcript item 与仅用于 UI/流式显示的 transient delta 分离，只有前者进入 JSONL。
+- writer 提供 `append`、`flush`、`shutdown`、失败重试和幂等 ordinal 分配；进程退出前由 session 负责 flush。
+- append 的顺序由 session 内单调 ordinal 决定，读取时拒绝重复 ordinal，并将无法解析的完整行报告为结构化损坏。
+- M5 只保证单进程 writer；多进程锁、生命周期 reservation 和 stale writer 清理延期到后续阶段。
 
 ### 8.2 最小事件集
 
@@ -818,23 +847,33 @@ Reader 必须处理：
 
 恢复策略必须保守：不自动重放可能有副作用的工具。未确认执行结果的写工具标记为 `unknown_outcome`，要求用户检查。
 
+恢复必须以 session 为边界，而不是以单次 `run` 的临时 history 为边界。`TurnRunner` 产生的事件由 `SessionCoordinator` 统一提交；否则同一 session 的多次 run 无法得到连续 Transcript。
+
 ### 8.4 Session index
 
-M5 先使用可重建的 JSON index 或内存扫描；不要立刻引入 SQLite 复杂度。数据量和查询需求明确后，在 M10 添加 SQLite。
+M5 先使用可重建的 JSON index 或内存扫描；删除 index 后必须能从 JSONL 重建。SQLite 只作为后续查询优化，不是 M5 的真源，也不应成为 Resume 的前置依赖。当前规划统一为：M5 JSON index，M6-M9 按需优化扫描，M10 再评估 SQLite。
 
-### 8.5 M5 完成标准
+### 8.5 Fork 语义
+
+- M5 实现 **copied fork**：创建新的 session/transcript，复制指定历史边界之前的 canonical items，并写入 `parentSessionId`、`forkedAtOrdinal` 和 fork 原因。
+- 父 session 只读且不可被子 session 的 append 修改；子 session 后续事件拥有自己的 ordinal 空间。
+- Codex 的 **reference/paginated fork**（通过 `history_base`、byte/ordinal offset 延迟读取父历史）留到 M8/M10 的大历史优化阶段；在此之前不得把“复制 fork”和“引用 fork”混为一个 API。
+
+### 8.6 M5 完成标准
 
 - 结束后可通过 session id resume。
 - 崩溃在模型流、工具执行、approval 三个位置均有测试。
 - resume 后不会重复执行写工具。
 - fork 保留父 session id 和历史边界。
 - 删除索引后可从 JSONL 重建。
+- 连续多次 `run` 共享同一个 session transcript；UI transient delta 不会污染 canonical history。
+- 未确认副作用恢复为 `unknown_outcome`，不会自动重复执行写工具。
 
 ## 9. M6：上下文 checkpoint 与压缩
 
-预计：4 到 6 个开发日。
+工作区状态（2026-09-05）：本节实现已落地并通过 `npm run check`（75 tests）；整体路线图仍等待 M4/M5 按顺序完成发布验收，因此不跳级修改项目发布里程碑。
 
-目标：把当前内存文本压缩升级为可恢复的 context window 管理。
+目标：把当前内存文本压缩升级为与 Codex 核心语义对齐的可恢复 context window 管理。完整设计、源码证据、差距和测试矩阵见 [m6-context-checkpoint-compaction.md](./m6-context-checkpoint-compaction.md)；本节不得被解释为更小的“简化版 M6”。
 
 ### 9.1 先修当前已知问题
 
@@ -846,37 +885,60 @@ M5 先使用可重建的 JSON index 或内存扫描；不要立刻引入 SQLite 
 
 ### 9.2 ContextManager
 
-`TranscriptStore` 保存完整历史；`ContextManager.forPrompt()` 生成投影。
+`SessionCoordinator` 持有唯一 annotated `ContextManager` 和 `ContextWindowState`；`TranscriptStore` 保存完整历史，`ContextManager.forPrompt()` 只生成规范化投影。禁止 `TurnRunner` 克隆出另一个长期 history 真相。
 
 压缩等级：
 
 1. 大结果 spill。
 2. 清理旧 tool body，保留引用。
 3. 投影旧 turn。
-4. 模型摘要。
-5. window rollover/checkpoint。
+4. capability-selected local/remote compaction，生成并校验 replacement history。
+5. window rollover/checkpoint、world-state full baseline和reference turn context。
+
+M6 必须同时具备local summarization backend和provider capability驱动的remote backend边界；deterministic string join只能作为测试fixture，不能作为生产实现。工具调用/结果必须成对规范化，单item和replacement history都要有硬上限。
 
 ### 9.3 Checkpoint
 
 每次压缩写入：
 
-- before/after token estimate。
-- summary。
-- replacement history。
-- window id。
-- 最近文件和任务状态。
-- 当前 world state fingerprint。
-- compaction reason 和 phase。
+- stable compaction id及started/completed/failed/interrupted生命周期。
+- trigger、reason、phase、implementation和status。
+- provider-observed/estimated before/after token状态。
+- local summary（remote模式可为空）和完整annotated replacement history。
+- `window_number`、`first_window_id`、`previous_window_id`、`window_id`。
+- resource-origin扩展信息。
+- 同一安装边界后的full world-state baseline、fingerprint和reference turn context。
 
-Resume 直接重放 checkpoint，不再次调用模型摘要。
+checkpoint只在backend成功且replacement校验通过后安装。Resume/Fork/rollback必须反向定位最新surviving checkpoint，以replacement history为base并正向重放后缀，不再次调用模型摘要；旧格式走显式migration/fallback，不能静默猜测。
 
-### 9.4 M6 完成标准
+### 9.4 三种触发路径与上下文注入
 
-- pre-turn、mid-turn 和 manual compact 都有测试。
-- 压缩后任务、用户约束和最近文件仍存在。
-- resume 后 prompt 投影与压缩后等价。
-- token 预算不会只计算 history。
-- 超限时不会无限 compact 循环。
+- pre-turn：新用户输入和context update进入history前触发；成功后下一普通turn全量重注入当前context。
+- mid-turn：模型仍需follow-up或有pending input时触发；当前initial context必须插在最后真实用户消息之前，压缩后继续同一turn且不重复工具副作用。
+- manual：作为独立、不可steer的compact turn进入session队列，支持取消/超时和自定义有界prompt。
+
+触发原因至少覆盖context limit、model downshift和comp-hash change。后端至少区分local responses、remote compact/v2和new-context策略，并统一到同一个checkpoint安装协议。
+
+### 9.5 Token window 与失败语义
+
+- 分开model hard context limit、auto-compact limit、max output、tool-result budget和rollout budget。
+- 支持`total`与`body_after_prefix` scope，持久化/恢复窗口prefill；完整hard cap始终生效。
+- provider usage关联request/history version/window id，压缩后重算；缺失usage明确标记estimated。
+- transient stream error按provider预算重试；compact请求超限时按完整item group从旧到新有界裁剪。
+- interruption不重试；pre-commit失败不推进window、不替换live history、不写completed checkpoint。checkpoint提交后的baseline写失败或`PostCompact`停止保留新窗口并终止后续流程，不得回滚或伪装成未安装。
+- 压缩后无token进展或仍超hard limit时熔断，禁止同一窗口/原因/phase无限重试。
+
+### 9.6 M6 完成标准
+
+- pre-turn、mid-turn、manual compact的request shape、生命周期、取消和错误路径都有测试。
+- local/remote backend安装语义等价，remote输出会过滤陈旧developer/context并重注入当前canonical context。
+- compact后任务、用户约束、关键决策、失败尝试、待办和当前world state仍存在且有硬上限。
+- compact -> Resume -> Fork以及第二次compact -> Resume的模型可见投影前缀等价，恢复不再次摘要。
+- checkpoint append失败/进程中断不产生半安装；旧history和window保持可恢复。
+- token预算覆盖完整model request并有usage anchor/window prefill；不再由`PromptBuilder`二次静默截断。
+- tool result在进入canonical history前spill，引用跨Resume/Fork有效且不碰撞。
+- context overflow、transient retry、timeout、interrupt、invalid replacement、schema migration和no-progress均有故障注入测试。
+- `npm run check`通过；FakeModel不得替代真实request shape、streaming usage、retry或remote parity验证。
 
 ## 10. M7：配置、AGENTS.md、CLAUDE.md 与 Skills
 

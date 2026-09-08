@@ -2,11 +2,9 @@ import type { AgentConfig, CompletedTaskSummary, Message, Task } from "../types.
 import type { ToolSpec } from "../tools/types.js";
 import { qualifiedName } from "../tools/registry.js";
 
-const MESSAGE_OVERHEAD = 4; // 每条消息的角色/分隔符开销（估算）
-
 export class PromptBuilder {
   build(opts: {
-    messages: Message[];
+    messages: readonly Message[];
     currentTask?: Task;
     completedTasks?: CompletedTaskSummary[];
     workingMemory?: Record<string, unknown>;
@@ -14,17 +12,12 @@ export class PromptBuilder {
     tools: ToolSpec[];
     config: AgentConfig;
   }): Message[] {
-    const { messages, currentTask, completedTasks, workingMemory, agentMemories, tools, config } = opts;
-
-    const systemContent = this.buildSystemPrompt(tools, currentTask, completedTasks, workingMemory, agentMemories);
-    // system 提示本身也计入上下文预算
-    const systemTokens = estimateTokens(systemContent) + MESSAGE_OVERHEAD;
-    const history = truncateHistory(messages, config.maxContextTokens, systemTokens);
-
-    return [{ role: "system", content: systemContent }, ...history];
+    const { messages, currentTask, completedTasks, workingMemory, agentMemories, tools } = opts;
+    const systemContent = this.systemPrompt(tools, currentTask, completedTasks, workingMemory, agentMemories);
+    return [{ role: "system", content: systemContent }, ...messages.map((message) => structuredClone(message))];
   }
 
-  private buildSystemPrompt(
+  systemPrompt(
     tools: ToolSpec[],
     task?: Task,
     completedTasks?: CompletedTaskSummary[],
@@ -100,51 +93,5 @@ function isCJKChar(code: number): boolean {
     (code >= 0x3000 && code <= 0x30ff) ||
     (code >= 0xff00 && code <= 0xffef)
   );
-}
-
-function messageTokens(m: Message): number {
-  return estimateTokens(m.content) + (m.name ? estimateTokens(m.name) : 0) + MESSAGE_OVERHEAD;
-}
-
-interface Turn {
-  messages: Message[];
-  tokens: number;
-}
-
-function truncateHistory(messages: Message[], maxContextTokens: number, systemTokens: number): Message[] {
-  const budget = Math.max(0, maxContextTokens - systemTokens);
-
-  const firstAssistant = messages.findIndex((m) => m.role === "assistant");
-  const prefix = firstAssistant === -1 ? messages : messages.slice(0, firstAssistant);
-  const rest = firstAssistant === -1 ? [] : messages.slice(firstAssistant);
-
-  const turns: Turn[] = [];
-  for (const m of rest) {
-    if (m.role === "assistant" || turns.length === 0) {
-      turns.push({ messages: [m], tokens: messageTokens(m) });
-    } else {
-      const last = turns[turns.length - 1];
-      last.messages.push(m);
-      last.tokens += messageTokens(m);
-    }
-  }
-
-  const prefixTokens = prefix.reduce((sum, m) => sum + messageTokens(m), 0);
-  let total = prefixTokens + turns.reduce((sum, t) => sum + t.tokens, 0);
-
-  let dropped = 0;
-  while (total > budget && turns.length > 0) {
-    total -= turns[0].tokens;
-    turns.shift();
-    dropped += 1;
-  }
-
-  if (dropped > 0) {
-    console.warn(`[prompt-builder] 上下文超预算：已丢弃最早的 ${dropped} 轮消息，剩余 ${total}/${budget} tokens。`);
-  } else if (total > budget) {
-    console.warn(`[prompt-builder] 警告：仅任务描述本身（${total} tokens）已超过预算（${budget} tokens），无法继续截断。`);
-  }
-
-  return [...prefix, ...turns.flatMap((t) => t.messages)];
 }
 

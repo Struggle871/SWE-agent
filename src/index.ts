@@ -8,7 +8,7 @@ import { AuditTrail } from "./security/audit.js";
 import { DefaultCommandAnalyzer } from "./security/command-policy.js";
 import { PermissionPolicy } from "./security/permission-policy.js";
 import { WorkspacePolicy } from "./security/workspace-policy.js";
-import { LocalSandboxProvider } from "./security/sandbox.js";
+import { LocalSandboxProvider, UnavailableSandboxProvider, WindowsDockerSandboxProvider } from "./security/sandbox.js";
 import { FakeModelClient, OpenAIChatModelClient } from "./model/model-client.js";
 import { editFileTool } from "./tools/edit.js";
 import { listDirTool, readFileTool, writeFileTool } from "./tools/file-io.js";
@@ -41,6 +41,7 @@ async function main() {
   const shell = new ShellSession(config.workspaceRoot);
   const fileStateCache = new FileStateCache();
   const workspacePolicy = await WorkspacePolicy.create({ readableRoots: [config.workspaceRoot] });
+  const sandboxProvider = createSandboxProvider(config.workspaceRoot);
 
   const ctx: AgentContext = {
     config,
@@ -52,14 +53,15 @@ async function main() {
     agentMemories: loadAgentMemories(config.workspaceRoot),
     fileStateCache,
     workspacePolicy,
-    commandAnalyzer: new DefaultCommandAnalyzer(workspacePolicy),
+    commandAnalyzer: new DefaultCommandAnalyzer(workspacePolicy, sandboxProvider.capabilities().shellDialect),
     permissionPolicy: new PermissionPolicy(),
     approvalBroker: new CliApprovalBroker(),
     auditTrail: new AuditTrail(`${config.workspaceRoot}/.swe-agent/audit.jsonl`),
-    sandboxProvider: new LocalSandboxProvider(config.workspaceRoot),
+    sandboxProvider,
   };
 
-  const userRequest = process.argv[2] ?? "列出当前目录内容，然后给出最终结论";
+  const cli = parseCliArguments(process.argv.slice(2));
+  const userRequest = cli.request ?? "列出当前目录内容，然后给出最终结论";
 
   console.log("=".repeat(60));
   console.log("Minimal SWE Agent");
@@ -69,7 +71,13 @@ async function main() {
   if (ctx.agentMemories) console.log(`项目记忆: 已加载 ${ctx.agentMemories.split("\n").length} 行`);
   console.log("=".repeat(60));
 
-  const session = new AgentSession(ctx, onEvent);
+  const session = cli.resume
+    ? await AgentSession.resume(ctx, cli.resume, onEvent)
+    : cli.fork
+      ? await AgentSession.fork(ctx, cli.fork, { atOrdinal: cli.atOrdinal, reason: "CLI fork" }, onEvent)
+      : new AgentSession(ctx, onEvent);
+  console.log(`Session: ${session.sessionId}`);
+  console.log(`Transcript: ${session.transcriptPath}`);
 
   try {
     const result = await session.run(userRequest);
@@ -85,8 +93,44 @@ async function main() {
       }
     }
   } finally {
+    await session.close();
     await shell.close();
   }
+}
+
+interface CliArguments { request?: string; resume?: string; fork?: string; atOrdinal?: number }
+
+function parseCliArguments(args: string[]): CliArguments {
+  const result: CliArguments = {};
+  const requestParts: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--resume" || argument === "--fork") {
+      const value = args[++index];
+      if (!value) throw new Error(`${argument} 需要 session id`);
+      if (argument === "--resume") result.resume = value;
+      else result.fork = value;
+      continue;
+    }
+    if (argument === "--at") {
+      const value = Number(args[++index]);
+      if (!Number.isInteger(value) || value < 0) throw new Error("--at 需要非负 ordinal");
+      result.atOrdinal = value;
+      continue;
+    }
+    requestParts.push(argument);
+  }
+  if (result.resume && result.fork) throw new Error("--resume 与 --fork 不能同时使用");
+  if (result.atOrdinal !== undefined && !result.fork) throw new Error("--at 只能与 --fork 一起使用");
+  if (requestParts.length > 0) result.request = requestParts.join(" ");
+  return result;
+}
+
+function createSandboxProvider(root: string) {
+  const requestedMode = process.env.SWE_SANDBOX_MODE?.trim().toLowerCase();
+  if (requestedMode === "best-effort") return new LocalSandboxProvider(root);
+  if (process.platform === "win32") return new WindowsDockerSandboxProvider(root);
+  return new UnavailableSandboxProvider();
 }
 
 function onEvent(e: AgentEvent): void {

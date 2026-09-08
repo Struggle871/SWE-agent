@@ -66,11 +66,13 @@ export interface SandboxResult {
   timedOut: boolean;
   cancelled: boolean;
   outputTruncated?: boolean;
+  executionId?: string;
 }
 
 export interface SandboxProvider {
   capabilities(): SandboxCapabilities;
   execute(request: SandboxRequest): Promise<SandboxResult>;
+  readOutput?(executionId: string, tailLines?: number): string;
 }
 
 export interface SandboxAdmission {
@@ -127,6 +129,7 @@ export function missingSandboxCapabilities(
  */
 export class LocalSandboxProvider implements SandboxProvider {
   private readonly root: string;
+  private readonly outputs = new Map<string, string>();
 
   constructor(root: string) {
     this.root = path.resolve(root);
@@ -171,7 +174,9 @@ export class LocalSandboxProvider implements SandboxProvider {
         if (settled) return;
         settled = true;
         cleanup();
-        resolve(result);
+        const executionId = randomUUID();
+        this.outputs.set(executionId, [result.stdout, result.stderr ? `[stderr]\n${result.stderr}` : ""].filter(Boolean).join("\n"));
+        resolve({ ...result, executionId });
       };
       const fail = (error: unknown) => {
         if (settled) return;
@@ -199,6 +204,11 @@ export class LocalSandboxProvider implements SandboxProvider {
     });
   }
 
+  readOutput(executionId: string, tailLines?: number): string {
+    const output = this.outputs.get(executionId) ?? "";
+    return tailLines && tailLines > 0 ? output.split("\n").slice(-tailLines).join("\n") : output;
+  }
+
 }
 
 export interface WindowsDockerSandboxOptions {
@@ -217,6 +227,7 @@ export class WindowsDockerSandboxProvider implements SandboxProvider {
   private readonly image: string;
   private readonly dockerCommand: string;
   private readonly outputBytes: number;
+  private readonly outputs = new Map<string, string>();
 
   constructor(root: string, options: WindowsDockerSandboxOptions = {}) {
     this.root = path.resolve(root);
@@ -290,7 +301,7 @@ export class WindowsDockerSandboxProvider implements SandboxProvider {
         const used = Buffer.byteLength(stdout) + Buffer.byteLength(stderr);
         const remaining = Math.max(0, limit - used);
         if (Buffer.byteLength(text) > remaining) outputTruncated = true;
-        const clipped = Buffer.byteLength(text) <= remaining ? text : text.slice(0, remaining);
+        const clipped = Buffer.byteLength(text) <= remaining ? text : new TextDecoder().decode(Buffer.from(text, "utf8").subarray(0, remaining));
         if (target === "stdout") stdout += clipped;
         else stderr += clipped;
       };
@@ -304,7 +315,9 @@ export class WindowsDockerSandboxProvider implements SandboxProvider {
         if (settled) return;
         settled = true;
         cleanup();
-        resolve(result);
+        const executionId = randomUUID();
+        this.outputs.set(executionId, [result.stdout, result.stderr ? `[stderr]\n${result.stderr}` : ""].filter(Boolean).join("\n"));
+        resolve({ ...result, executionId });
       };
       const fail = (error: unknown) => {
         if (settled) return;
@@ -331,6 +344,11 @@ export class WindowsDockerSandboxProvider implements SandboxProvider {
     });
   }
 
+  readOutput(executionId: string, tailLines?: number): string {
+    const output = this.outputs.get(executionId) ?? "";
+    return tailLines && tailLines > 0 ? output.split("\n").slice(-tailLines).join("\n") : output;
+  }
+
   private assertStrictProfile(profile?: SandboxProfile): void {
     if (!profile) return;
     if (path.resolve(profile.workspaceRoot) !== this.root) throw new SandboxCapabilityError(["sandbox workspace root"]);
@@ -350,6 +368,7 @@ export class UnavailableSandboxProvider implements SandboxProvider {
   async execute(_request: SandboxRequest): Promise<SandboxResult> {
     throw new SandboxCapabilityError(["sandbox provider"]);
   }
+  readOutput(): string { return ""; }
 }
 
 export function createSandboxProfile(root: string, timeoutMs: number, strictness: SandboxProfile["strictness"] = "best_effort"): SandboxProfile {

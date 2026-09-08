@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { SessionId, StepId, TurnId } from "../protocol/ids.js";
+import { envelope } from "../core/context/compaction-history.js";
+import type { MessagePayload } from "./rollout-schema.js";
 import {
   TRANSCRIPT_SCHEMA_VERSION,
   type TranscriptEnvelope,
@@ -39,13 +41,14 @@ export class RolloutWriter {
 
   append(kind: TranscriptKind, payload: TranscriptPayload, context: AppendContext = {}): Promise<TranscriptEnvelope> {
     if (this.closed) return Promise.reject(new Error(`Session ${this.sessionId} transcript writer 已关闭`));
+    const normalizedPayload = kind === "message" ? canonicalMessagePayload(payload as MessagePayload, context) : payload;
     const record: TranscriptEnvelope = {
       schemaVersion: TRANSCRIPT_SCHEMA_VERSION,
       ordinal: this.nextOrdinal++,
       timestamp: context.timestamp ?? Date.now(),
       sessionId: this.sessionId,
       kind,
-      payload,
+      payload: normalizedPayload,
       ...(context.turnId ? { turnId: context.turnId } : {}),
       ...(context.stepId ? { stepId: context.stepId } : {}),
       ...(context.inheritedFrom ? { inheritedFrom: context.inheritedFrom } : {}),
@@ -76,6 +79,17 @@ export class RolloutWriter {
       activeFiles.delete(path.resolve(this.filePath).toLowerCase());
     }
   }
+}
+
+function canonicalMessagePayload(payload: MessagePayload, context: AppendContext): MessagePayload {
+  if (payload.item) return { item: structuredClone(payload.item) };
+  const message = payload.message;
+  if (!message) throw new Error("message transcript payload 缺少 item/message");
+  return { item: envelope(message, {
+    kind: payload.contextItem?.metadata.kind ?? "conversation",
+    ...(context.turnId ? { turnId: context.turnId } : {}),
+    ...(context.stepId ? { stepId: context.stepId } : {}),
+  }) };
 }
 
 async function appendWithRetry(filePath: string, text: string, durable: boolean): Promise<void> {

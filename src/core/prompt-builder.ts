@@ -11,10 +11,13 @@ export class PromptBuilder {
     agentMemories?: string;
     tools: ToolSpec[];
     config: AgentConfig;
+    nativeToolCalls?: boolean;
+    contextualFragments?: readonly { role: "user" | "developer"; text: string }[];
   }): Message[] {
-    const { messages, currentTask, completedTasks, workingMemory, agentMemories, tools } = opts;
-    const systemContent = this.systemPrompt(tools, currentTask, completedTasks, workingMemory, agentMemories);
-    return [{ role: "system", content: systemContent }, ...messages.map((message) => structuredClone(message))];
+    const { messages, currentTask, completedTasks, workingMemory, agentMemories, tools, nativeToolCalls = false } = opts;
+    const systemContent = this.systemPrompt(tools, currentTask, completedTasks, workingMemory, agentMemories, nativeToolCalls);
+    const fragments = (opts.contextualFragments ?? []).map((fragment) => ({ role: fragment.role, content: fragment.text } as Message));
+    return [{ role: "system", content: systemContent }, ...fragments, ...messages.map((message) => structuredClone(message))];
   }
 
   systemPrompt(
@@ -23,9 +26,10 @@ export class PromptBuilder {
     completedTasks?: CompletedTaskSummary[],
     workingMemory?: Record<string, unknown>,
     agentMemories?: string,
+    nativeToolCalls = false,
   ): string {
     const toolList = tools
-      .map((t) => `- ${qualifiedName(t)}: ${t.description}\n  参数: ${JSON.stringify(t.parameters)}`)
+      .map((t) => `- ${qualifiedName(t)}: ${t.description}${nativeToolCalls ? "" : `\n  参数: ${JSON.stringify(t.parameters)}`}`)
       .join("\n");
 
     const taskLine = task ? task.description : "（无）";
@@ -36,22 +40,22 @@ export class PromptBuilder {
       "## 可用工具",
       toolList || "（无）",
       "",
-      "## 输出格式",
-      "每一步必须只输出一个 JSON 对象，不要输出任何多余文本：",
-      '{"thought": "<一句话说明这一步要做什么>", "action": "<工具名或 final_answer>", "action_input": { ... }}',
-      "",
       "## 规则",
-      "1. 每一步只能调用一个工具。",
-      "2. 根据工具返回的观察结果逐步推进。",
-      "3. 当你已经得到最终结论时，使用 final_answer 结束。",
-      "4. 编辑或写入文件前，必须先使用 read_file 读取目标文件的最新内容；禁止凭猜测修改未读取的文件。",
+      "1. 根据工具返回的观察结果逐步推进。",
+      "2. 当你已经得到最终结论时结束。",
+      "3. 编辑或写入文件前，必须先使用 read_file 读取目标文件的最新内容；禁止凭猜测修改未读取的文件。",
       "",
       "## 当前子任务",
       taskLine,
     ];
 
+    if (!nativeToolCalls) {
+      sections.splice(2, 0, "## 输出格式", "每一步必须只输出一个 JSON 对象，不要输出任何多余文本：", '{"thought": "<一句话说明这一步要做什么>", "action": "<工具名或 final_answer>", "action_input": { ... }}', "");
+      sections.splice(7, 0, "每一步只能调用一个工具。", "");
+    }
+
     // 项目记忆（CLAUDE.md / AGENTS.md，对齐 Claude Code / Codex 的注入顺序）
-    if (agentMemories && agentMemories.trim()) {
+    if (!nativeToolCalls && agentMemories && agentMemories.trim()) {
       sections.push("", "## 项目记忆", agentMemories.trim());
     }
 

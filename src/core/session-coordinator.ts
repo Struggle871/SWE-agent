@@ -15,6 +15,7 @@ import type { CompactionHooks, CompactionResult, WorldStatePayload } from "./con
 import { ToolResultStorage } from "./context/tool-result-storage.js";
 import { buildWorldState, referenceContext, renderWorldState, worldStateDiff } from "./context/world-state.js";
 import { fingerprint, requestFingerprint } from "./context/token-accounting.js";
+import { buildSpecPlan } from "../tools/spec-plan.js";
 
 type PendingWork =
   | { type: "run"; request: string; signal?: AbortSignal; resolve: (result: AgentRunResult) => void; reject: (error: unknown) => void }
@@ -324,7 +325,7 @@ export class SessionCoordinator {
         normalized.requestId,
         this.context.historyVersion(),
         requestFingerprint({
-          messages: [], tools: this.ctx.registry.visibleSpecs().map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters })),
+        messages: [], tools: buildSpecPlan(this.ctx.registry).definitions,
           maxOutputTokens: this.ctx.config.maxOutputTokens,
           model: this.ctx.config.model.model,
         }),
@@ -337,8 +338,9 @@ export class SessionCoordinator {
       ...(context.stepId ? { stepId: context.stepId } : {}),
       ...(usageAnchor ? { usageAnchor } : {}),
     });
-    await this.persist("message", { message: normalized, contextItem: item }, context);
+    await this.persist("message", { item }, context);
     this.context.recordPersisted(item);
+    this.onEvent?.({ type: "response_item", sessionId: this.sessionId, ...(context.turnId ? { turnId: context.turnId } : {}), ...(context.stepId ? { stepId: context.stepId } : {}), item });
     return structuredClone(normalized);
   }
 
@@ -375,7 +377,7 @@ export class SessionCoordinator {
   private compHash(): string {
     return fingerprint({
       model: this.ctx.config.model.model,
-      instructions: this.ctx.agentMemories ?? "",
+      instructions: this.ctx.contextualFragments?.map((fragment) => fragment.hash).join(":") ?? this.ctx.agentMemories ?? "",
       tools: this.ctx.registry.visibleSpecs(),
       permissions: this.ctx.permissionPolicy.fingerprint(),
     });

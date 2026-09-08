@@ -430,32 +430,38 @@ interface PermissionProfile {
 
 ### 8.1 配置层级
 
-高优先级覆盖低优先级，但 managed requirements 可限制而不能被项目覆盖：
+高优先级普通层覆盖低优先级，managed requirements 是独立约束平面，可收紧但不能被任何普通层放宽：
 
 ```text
 packaged defaults
-< system/managed requirements
-< user (`/.swe-agent/config.toml)
-< project (.swe-agent/config.toml)
-< local (.env)
-< session flags
-< CLI overrides
+< system defaults
+< enterprise managed defaults
+< user (`~/.swe-agent/config.toml`)
+< profile
+< project root ... cwd (`.swe-agent/config.toml`)
+< explicit env compatibility patch
+< session flags（包含 CLI overrides）
 ```
 
-每层保留 `source`、文件路径、解析警告和有效值；使用严格 schema，未知字段在 strict 模式报错，非 strict 模式也要告警。 `config.ts` 只负责 env 兼容，真正合并移到 `config/loader.ts`。
+每层保留 `source`、文件路径、version、disabled reason、解析诊断和有效值，每个 dotted key 保留 origin。使用完整 TOML parser 和严格 schema；语法、未知字段、类型或 requirement 冲突在 strict 模式 fail closed。`.env` 不是 Codex 原生配置层，只是本项目兼容入口，并且只能产生实际设置字段的 patch。project root/trust 由 non-project 配置决定，untrusted project layer 可显示但不参与 effective config。`config.ts` 只负责 env 兼容，真正合并移到 `config/loader.ts`。
 
-### 8.2 AGENTS.md / CLAUDE.md
+### 8.2 AGENTS.md
 
-- 从 project root 到 cwd 收集层级文件，默认候选 `AGENTS.md`、`CLAUDE.md`，允许配置 fallback filenames。
-- 每个 entry 保留来源路径、环境/cwd 和优先级；同一文件不重复注入。
-- 字节预算按层递减，截断必须在 UTF-8 字节边界安全完成；模型上下文显示来源。
-- system/developer instructions、用户指令和项目指令分段注入，项目文件不能伪造更高优先级的系统规则。
+- trusted project 内从 root 到 cwd 收集层级文件；每目录按 `AGENTS.override.md > AGENTS.md > configured fallbacks` 只选一个普通文件。`CLAUDE.md` 不是默认候选，只能显式配置为 compatibility fallback。
+- 每个 entry 保留 canonical source path、environment/cwd、byte length 和 content hash；同一文件不重复注入。
+- 所有 entry 共享有界字节预算，按原始 bytes 读取并 UTF-8 安全解码；读取必须经过 workspace/sandbox filesystem 边界。
+- AGENTS 作为 user-role contextual fragment 注入，不拼进 system prompt。world state 用 full/replacement/removal snapshot 表达变化，并由 M6 checkpoint、Resume/Fork replay。
+- system/developer instructions、用户指令和项目指令分段注入，项目文件不能伪造更高优先级规则或改变权限。
 
 ### 8.3 Skills / Plugins / MCP
 
-- `SKILL.md` frontmatter 严格解析，正文按预算分层退化：完整 -> 字符轮转 -> 最小行；只在被提及/匹配时注入。
+- Skills 分为 developer-role metadata catalog、显式选中后的 user-role `SKILL.md` body 和按需 supporting resources。catalog 超预算时先保留所有最小行，再公平缩短 description；该算法不用于正文。
+- 本地 host skills 以 canonical path 为 identity，保留 scope 和同名冲突；有界扫描 roots/depth/entries/concurrency，单项解析错误隔离。enablement 只接受 user/session 层规则。
+- M7 只实现显式 mention、catalog 预算和 selected-body 单项/总预算。正文/supporting scripts 不能绕过工具安全链；隐式 selector 与 provider roots 延期。
 - plugin manifest 必须声明版本、工具、skills、权限和 hash；安装/启用前需信任检查。
 - MCP 连接采用状态机 `disconnected -> connecting -> ready -> degraded -> closed`，支持 stdio、HTTP/SSE 和 websocket adapter；工具 spec 进入 exposure plan，连接失败不能拖死主 session。
+
+配置、AGENTS 和 Skills 的 M7 专项实现契约见 [m7-config-agents-skills.md](./m7-config-agents-skills.md)。Plugin/MCP 条目属于后续里程碑，不能据此把 M7 标记为已实现。
 
 ## 9. 任务图、多 agent 与协作
 

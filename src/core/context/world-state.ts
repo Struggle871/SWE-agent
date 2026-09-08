@@ -24,11 +24,11 @@ export function buildWorldState(input: WorldStateInput): WorldStatePayload {
       parameters: tool.parameters,
       exposure: tool.exposure ?? "direct",
     })),
-    instructions: input.ctx.agentMemories ?? "",
+    instructions: input.ctx.contextualFragments?.filter((fragment) => fragment.type === "agents_md.instructions").map((fragment) => fragment.text).join("\n\n") ?? input.ctx.agentMemories ?? "",
     workingMemory: input.ctx.workingMemory,
     currentTask: input.task ? { id: input.task.id, description: input.task.description } : null,
     completedTasks: input.completedTasks ?? [],
-    skills: [],
+    skills: input.ctx.contextualFragments?.filter((fragment) => fragment.type === "skills.catalog").map((fragment) => ({ source: fragment.source, hash: fragment.hash, text: fragment.text })) ?? [],
     mcp: { resources: [], tools: [] },
     collaboration: { mode: "single_agent" },
   };

@@ -1,4 +1,5 @@
-import { loadAgentMemories } from "./config/agents-md.js";
+import { loadAgentInstructionFragments } from "./config/agents-md.js";
+import { loadSkillFragments } from "./config/skills.js";
 import { loadLayeredConfig } from "./config/layered-config.js";
 import { AgentSession } from "./core/agent-session.js";
 import type { AgentEvent } from "./core/events.js";
@@ -50,7 +51,7 @@ async function main() {
     model,
     workspaceRoot: config.workspaceRoot,
     workingMemory: {},
-    agentMemories: loadAgentMemories(config.workspaceRoot),
+    contextualFragments: [...loadAgentInstructionFragments(config.workspaceRoot), ...loadSkillFragments(config.workspaceRoot)],
     fileStateCache,
     workspacePolicy,
     commandAnalyzer: new DefaultCommandAnalyzer(workspacePolicy, sandboxProvider.capabilities().shellDialect),
@@ -68,7 +69,7 @@ async function main() {
   console.log(`模型: ${config.useFakeModel ? "FakeModel（演示）" : config.model.model}`);
   console.log(`工作目录: ${config.workspaceRoot}`);
   console.log(`任务: ${userRequest}`);
-  if (ctx.agentMemories) console.log(`项目记忆: 已加载 ${ctx.agentMemories.split("\n").length} 行`);
+  if (ctx.contextualFragments?.length) console.log(`上下文片段: 已加载 ${ctx.contextualFragments.length} 项`);
   console.log("=".repeat(60));
 
   const session = cli.resume

@@ -3,6 +3,7 @@ import { asWindowId } from "../protocol/ids.js";
 import type { ApprovalResult } from "../security/approval-broker.js";
 import type { ToolRisk } from "../tools/preview.js";
 import type { Message, ToolResult } from "../types.js";
+import type { ResponseItemEnvelope } from "../protocol/items.js";
 import type { TurnTerminalReason } from "../core/events.js";
 import type {
   CompactCheckpointPayload, CompactionLifecyclePayload, ContextItemEnvelope,
@@ -10,8 +11,8 @@ import type {
 } from "../core/context/compaction-types.js";
 import { validateLineage } from "../core/context/context-window.js";
 
-export const TRANSCRIPT_SCHEMA_VERSION = 2 as const;
-export type SupportedTranscriptSchemaVersion = 1 | typeof TRANSCRIPT_SCHEMA_VERSION;
+export const TRANSCRIPT_SCHEMA_VERSION = 3 as const;
+export type SupportedTranscriptSchemaVersion = 1 | 2 | typeof TRANSCRIPT_SCHEMA_VERSION;
 
 export type TranscriptKind =
   | "session_meta" | "turn_started" | "turn_completed" | "turn_aborted" | "message"
@@ -47,7 +48,9 @@ export interface SessionMetaPayload {
 export interface TurnStartedPayload { userRequest: string }
 export interface TurnCompletedPayload { reason: TurnTerminalReason }
 export interface TurnAbortedPayload { reason: string }
-export interface MessagePayload { message: Message; contextItem?: ContextItemEnvelope }
+export type MessagePayload =
+  | { item: ResponseItemEnvelope; message?: Message; contextItem?: ContextItemEnvelope }
+  | { message: Message; contextItem?: ContextItemEnvelope; item?: ResponseItemEnvelope };
 export interface ToolCallPayload { callId: string; name: string; input: Record<string, unknown>; sideEffecting: boolean }
 export interface ToolResultPayload { callId: string; result: ToolResult }
 export interface ToolPreviewPayload {
@@ -75,7 +78,7 @@ const MAX_WIRE_ITEM_BYTES = 1_000_000;
 export function parseTranscriptEnvelope(value: unknown, lineNumber: number): TranscriptEnvelope {
   if (!isRecord(value)) throw invalid(lineNumber, "记录必须是对象");
   const record = value;
-  if (record.schemaVersion !== 1 && record.schemaVersion !== TRANSCRIPT_SCHEMA_VERSION) {
+  if (record.schemaVersion !== 1 && record.schemaVersion !== 2 && record.schemaVersion !== TRANSCRIPT_SCHEMA_VERSION) {
     throw invalid(lineNumber, `不支持 schemaVersion ${String(record.schemaVersion)}`);
   }
   if (!Number.isInteger(record.ordinal) || (record.ordinal as number) < 0) throw invalid(lineNumber, "ordinal 必须是非负整数");
@@ -84,16 +87,18 @@ export function parseTranscriptEnvelope(value: unknown, lineNumber: number): Tra
   if (typeof record.kind !== "string" || !KINDS.has(record.kind as TranscriptKind)) throw invalid(lineNumber, `未知 kind ${String(record.kind)}`);
   if (record.schemaVersion === 1 && !V1_KINDS.has(record.kind as TranscriptKind)) throw invalid(lineNumber, `schema v1 不支持 kind ${record.kind}`);
   if (!isRecord(record.payload)) throw invalid(lineNumber, "payload 必须是对象");
-  validatePayload(record.kind as TranscriptKind, record.payload, lineNumber);
+  validatePayload(record.kind as TranscriptKind, record.payload, lineNumber, record.schemaVersion as SupportedTranscriptSchemaVersion);
   return value as unknown as TranscriptEnvelope;
 }
 
-function validatePayload(kind: TranscriptKind, payload: Record<string, unknown>, line: number): void {
+function validatePayload(kind: TranscriptKind, payload: Record<string, unknown>, line: number, version: SupportedTranscriptSchemaVersion): void {
   if (kind === "session_meta") {
     if (typeof payload.cwd !== "string" || typeof payload.model !== "string") throw invalid(line, "session_meta 缺少 cwd/model");
     if (payload.initialWindowId !== undefined) asWindowIdValue(payload.initialWindowId, line);
   } else if (kind === "message") {
-    if (!isMessage(payload.message)) throw invalid(line, "message payload 无效");
+    if (version >= 3 && payload.item === undefined) throw invalid(line, "v3 message 缺少 canonical item");
+    if (payload.message !== undefined && !isMessage(payload.message)) throw invalid(line, "message payload 无效");
+    if (payload.item !== undefined) validateContextItem(payload.item, line, version >= 3);
     if (payload.contextItem !== undefined) validateContextItem(payload.contextItem, line);
   } else if (kind === "compact_checkpoint") {
     validateCheckpoint(payload, line);
@@ -132,17 +137,18 @@ function validateCheckpoint(payload: Record<string, unknown>, line: number): voi
   if (!Number.isInteger(payload.sourceThroughOrdinal) || (payload.sourceThroughOrdinal as number) < -1) throw invalid(line, "checkpoint sourceThroughOrdinal 无效");
 }
 
-function validateContextItem(value: unknown, line: number): asserts value is ContextItemEnvelope {
+function validateContextItem(value: unknown, line: number, requireItem = false): asserts value is ContextItemEnvelope {
   if (!isRecord(value) || typeof value.id !== "string" || !value.id || !isMessage(value.message) || !isRecord(value.metadata)) {
     throw invalid(line, "context item envelope 无效");
   }
   if (!["conversation", "context_injection", "compaction_summary", "remote_compaction"].includes(String(value.metadata.kind))) {
     throw invalid(line, "context item metadata.kind 无效");
   }
+  if (requireItem && !isRecord(value.item)) throw invalid(line, "canonical response item 缺失");
 }
 
 function isMessage(value: unknown): value is Message {
-  return isRecord(value) && ["system", "user", "assistant", "tool"].includes(String(value.role)) && typeof value.content === "string";
+  return isRecord(value) && ["system", "developer", "user", "assistant", "tool"].includes(String(value.role)) && typeof value.content === "string";
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
 function asWindowIdValue(value: unknown, line: number): WindowId {

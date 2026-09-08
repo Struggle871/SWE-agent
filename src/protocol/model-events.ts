@@ -1,11 +1,13 @@
 import type { CallId, RequestId } from "./ids.js";
 import type { Usage } from "./usage.js";
+import type { ResponseItemEnvelope } from "./items.js";
 
 export interface ModelMessage {
-  role: "system" | "user" | "assistant" | "tool";
+  role: "system" | "developer" | "user" | "assistant" | "tool";
   content: string;
   name?: string;
   usage?: Usage;
+  reasoning?: string;
   toolCalls?: Array<{ callId: CallId; name: string; input: unknown }>;
   toolCallId?: CallId;
 }
@@ -18,6 +20,7 @@ export interface ModelToolDefinition {
 
 export interface ModelRequest {
   requestId: RequestId;
+  items?: readonly ResponseItemEnvelope[];
   messages: readonly ModelMessage[];
   tools?: readonly ModelToolDefinition[];
   temperature?: number;

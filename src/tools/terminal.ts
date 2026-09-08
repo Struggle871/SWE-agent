@@ -249,6 +249,7 @@ export const runCommandTool: Tool = {
         })
       : await ctx.shell.run(command, timeoutMs);
     ctx.workingMemory["lastCommand"] = command;
+    if (result.executionId) ctx.workingMemory["lastExecutionId"] = result.executionId;
     ctx.workingMemory["lastExitCode"] = result.exitCode;
     return {
       toolName: "run_command",
@@ -270,7 +271,8 @@ export const readTerminalOutputTool: Tool = {
   },
   async execute(input, ctx): Promise<ToolResult> {
     const tailLines = typeof input.tailLines === "number" ? input.tailLines : undefined;
-    const output = ctx.shell.readPending(tailLines);
+    const executionId = typeof ctx.workingMemory["lastExecutionId"] === "string" ? ctx.workingMemory["lastExecutionId"] : undefined;
+    const output = executionId && ctx.sandboxProvider?.readOutput ? ctx.sandboxProvider.readOutput(executionId, tailLines) : ctx.shell.readPending(tailLines);
     return { toolName: "read_terminal_output", output: output || "（缓冲区无待读输出）" };
   },
 };

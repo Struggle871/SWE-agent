@@ -1,6 +1,6 @@
 import { asWindowId, type SessionId, type TurnId } from "../protocol/ids.js";
 import type { Message } from "../types.js";
-import { envelope } from "../core/context/compaction-history.js";
+import { canonicalizeEnvelope, envelope } from "../core/context/compaction-history.js";
 import type {
   CompactCheckpointPayload, ContextItemEnvelope, ContextWindowLineage,
   ReferenceContextPayload, WorldStatePayload,
@@ -61,9 +61,9 @@ export function reconstructSession(records: readonly TranscriptEnvelope[]): Reco
     if (record.ordinal <= baseOrdinal) continue;
     if (record.kind === "message") {
       const payload = record.payload as MessagePayload;
-      annotatedHistory.push(payload.contextItem
-        ? structuredClone(payload.contextItem)
-        : envelope(payload.message, {
+      annotatedHistory.push(payload.item || payload.contextItem
+        ? canonicalizeEnvelope(payload.item ?? payload.contextItem!)
+        : envelope(payload.message!, {
           kind: "conversation",
           ...(record.turnId ? { turnId: record.turnId } : {}),
           ...(record.stepId ? { stepId: record.stepId } : {}),

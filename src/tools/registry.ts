@@ -28,19 +28,19 @@ export class ToolRegistry {
   }
 
   get(name: string): ToolSpec | undefined {
-    return this.tools.get(name)?.spec;
+    return this.resolve(name)?.spec;
   }
 
   getSpec(name: string): ToolSpec | undefined {
-    return this.tools.get(name)?.spec;
+    return this.resolve(name)?.spec;
   }
 
   getRuntime(name: string): ToolRuntime | undefined {
-    return this.tools.get(name)?.runtime;
+    return this.resolve(name)?.runtime;
   }
 
   getRegistration(name: string): ToolRegistration | undefined {
-    return this.tools.get(name);
+    return this.resolve(name);
   }
 
   list(): ToolSpec[] {
@@ -57,12 +57,19 @@ export class ToolRegistry {
 
   /** 工具是否为只读（用于流式执行的并发安全判定） */
   isReadOnly(name: string): boolean {
-    return this.tools.get(name)?.spec.isReadOnly ?? false;
+    return this.resolve(name)?.spec.isReadOnly ?? false;
   }
 
   isParallelizable(name: string): boolean {
-    const spec = this.tools.get(name)?.spec;
+    const spec = this.resolve(name)?.spec;
     return spec?.parallelizable ?? spec?.isReadOnly ?? false;
+  }
+
+  private resolve(name: string): ToolRegistration | undefined {
+    const exact = this.tools.get(name);
+    if (exact || name.includes(".")) return exact;
+    const matches = [...this.tools.entries()].filter(([key]) => key.endsWith(`.${name}`));
+    return matches.length === 1 ? matches[0][1] : undefined;
   }
 }
 

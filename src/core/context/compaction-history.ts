@@ -3,9 +3,25 @@ import type { TurnId } from "../../protocol/ids.js";
 import type { Message } from "../../types.js";
 import { messageTokenCount } from "./token-estimator.js";
 import type { ContextItemEnvelope, ContextItemMetadata } from "./compaction-types.js";
+import type { ResponseItem } from "../../protocol/items.js";
 
 export function envelope(message: Message, metadata: ContextItemMetadata, id: string = randomUUID()): ContextItemEnvelope {
-  return { id, message: structuredClone(message), metadata: structuredClone(metadata) };
+  return { id, item: messageToResponseItem(message, id, metadata), message: structuredClone(message), metadata: structuredClone(metadata) };
+}
+
+export function canonicalizeEnvelope(item: ContextItemEnvelope): ContextItemEnvelope {
+  if (item.item) return structuredClone(item);
+  return envelope(item.message, item.metadata, item.id);
+}
+
+function messageToResponseItem(message: Message, id: string, metadata: ContextItemMetadata): ResponseItem {
+  const turnId = metadata.turnId;
+  if (message.role === "user") return { kind: "user_text", id, text: message.content, ...(turnId ? { turnId } : {}) };
+  if (message.role === "assistant" && message.toolCalls?.length === 1) return { kind: "tool_call", id: message.toolCalls[0].callId, name: message.toolCalls[0].name, input: message.toolCalls[0].input, ...(turnId ? { turnId } : {}) };
+  if (message.role === "assistant" && message.toolCalls?.length) return { kind: "tool_calls", id, calls: message.toolCalls.map((call) => ({ callId: call.callId, name: call.name, input: call.input })), ...(turnId ? { turnId } : {}), ...(metadata.stepId ? { stepId: metadata.stepId } : {}) };
+  if (message.role === "assistant") return { kind: "assistant_text", id, text: message.content, ...(turnId ? { turnId } : {}), ...(metadata.stepId ? { stepId: metadata.stepId } : {}), ...(message.usage ? { usage: message.usage } : {}) };
+  if (message.role === "tool" && message.toolCallId) return { kind: "tool_result", id, callId: message.toolCallId, name: message.name ?? "tool", output: { status: "ok", text: message.content, truncated: false }, ...(turnId ? { turnId } : {}) };
+  return { kind: "context_injection", id, source: metadata.kind, text: message.content };
 }
 
 export function retainLocalUserHistory(items: readonly ContextItemEnvelope[], maxTokens: number): ContextItemEnvelope[] {

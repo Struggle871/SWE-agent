@@ -2,7 +2,7 @@ import type { RequestId, StepId, TurnId } from "../../protocol/ids.js";
 import type { Usage } from "../../protocol/usage.js";
 import type { Message } from "../../types.js";
 import { ContextWindowState } from "./context-window.js";
-import { envelope, turnIds } from "./compaction-history.js";
+import { canonicalizeEnvelope, envelope, turnIds } from "./compaction-history.js";
 import type {
   CompactCheckpointPayload,
   ContextItemEnvelope,
@@ -33,7 +33,7 @@ export class ContextManager {
   private checkpointOrdinal: number | undefined;
 
   constructor(restored?: RestoredContextState) {
-    this.items = structuredClone(restored?.items ?? []);
+    this.items = (restored?.items ?? []).map(canonicalizeEnvelope);
     this.window = new ContextWindowState(restored?.window, restored?.prefillTokens);
     this.reference = structuredClone(restored?.referenceContext);
     this.world = structuredClone(restored?.worldState);
@@ -62,7 +62,7 @@ export class ContextManager {
   }
 
   recordPersisted(item: ContextItemEnvelope): void {
-    this.items.push(structuredClone(item));
+    this.items.push(canonicalizeEnvelope(item));
     this.version += 1;
     const usage = item.message.usage;
     if (usage) this.window.observeUsage(usage);

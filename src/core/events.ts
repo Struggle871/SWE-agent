@@ -33,6 +33,7 @@ export type AgentEvent =
   | { type: "stream_start" }
   | { type: "stream_delta"; delta: string }
   | { type: "model_event"; event: import("../protocol/model-events.js").ModelEvent }
+  | { type: "response_item"; sessionId: import("../protocol/ids.js").SessionId; turnId?: import("../protocol/ids.js").TurnId; stepId?: import("../protocol/ids.js").StepId; item: import("../protocol/items.js").ResponseItemEnvelope }
   | { type: "assistant_message"; message: import("../types.js").Message }
   | { type: "tool_use_started"; toolName: string; callId: string }
   | { type: "tool_use_completed"; toolName: string; isError: boolean }

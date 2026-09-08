@@ -15,6 +15,8 @@ import type { ContextManager } from "./context/context-manager.js";
 import { CompactionFailure, type CompactionRequestContext } from "./context/compaction-manager.js";
 import type { CompactionResult } from "./context/compaction-types.js";
 import type { ToolResult } from "../types.js";
+import { buildSpecPlan, type SpecPlan } from "../tools/spec-plan.js";
+import { loadSkillFragments } from "../config/skills.js";
 
 export interface TurnRunnerOptions {
   sessionId: SessionId;
@@ -47,6 +49,9 @@ export class TurnRunner {
     const history: Message[] = options.context.messages();
     const trace: AgentStep[] = [];
     const completedTasks: CompletedTaskSummary[] = [];
+    const specPlan: SpecPlan = buildSpecPlan(ctx.registry);
+    const explicitSkills = [...options.userRequest.matchAll(/\$([A-Za-z0-9_-]+)/g)].map((match) => match[1]);
+    const contextualFragments = [...(ctx.contextualFragments ?? []), ...loadSkillFragments(ctx.workspaceRoot, explicitSkills).filter((fragment) => fragment.type === "skills.body")];
     const scheduler = new TaskScheduler();
     let steps = 0;
     let currentTask: Task | undefined;
@@ -116,25 +121,25 @@ export class TurnRunner {
           }
 
           const transport = modelTransportFor(ctx.model);
+          const nativeToolCalls = transport.capabilities().nativeToolCalls;
           const buildMessages = () => this.promptBuilder.build({
             messages: history,
             currentTask: task,
             completedTasks,
             workingMemory: ctx.workingMemory,
-            tools: ctx.registry.visibleSpecs(),
+            tools: specPlan.tools.map((tool) => tool.spec),
             config: ctx.config,
             agentMemories: ctx.agentMemories,
+            nativeToolCalls,
+            contextualFragments,
           });
           const generate = () => {
             const messages = buildMessages();
             const request: ModelRequest = {
               requestId: createRequestId(),
+              items: options.context.annotatedItems(),
               messages: messages.map(toModelMessage),
-              tools: ctx.registry.visibleSpecs().map((tool) => ({
-                name: tool.name,
-                description: tool.description,
-                parameters: tool.parameters,
-              })),
+              tools: specPlan.definitions,
               temperature: 0,
               maxOutputTokens: ctx.config.maxOutputTokens,
             };
@@ -152,7 +157,7 @@ export class TurnRunner {
               executor: this.executor,
               ctx,
               parseRetry: ctx.config.parseRetry,
-              nativeToolCalls: transport.capabilities().nativeToolCalls,
+              nativeToolCalls,
               signal: options.signal,
               onMessageAppended: (message) => options.appendMessage(message, { turnId, stepId }),
               onToolCallStarted: (call) => options.persist?.("tool_call", {
@@ -262,6 +267,8 @@ export class TurnRunner {
       requestId: step.requestId,
       usage: step.usage,
       continueReason: step.continueReason,
+      reasoning: step.reasoning,
+      finishReason: step.finishReason,
     };
   }
 

@@ -1,5 +1,6 @@
 import type { CompactionId, RequestId, StepId, TurnId, WindowId } from "../../protocol/ids.js";
 import type { Usage } from "../../protocol/usage.js";
+import type { ResponseItemEnvelope, ResponseItemMetadata } from "../../protocol/items.js";
 import type { Message } from "../../types.js";
 
 export type CompactionTrigger = "manual" | "auto";
@@ -23,19 +24,9 @@ export interface UsageAnchorMetadata {
   observed: boolean;
 }
 
-export interface ContextItemMetadata {
-  kind: "conversation" | "context_injection" | "compaction_summary" | "remote_compaction";
-  turnId?: TurnId;
-  stepId?: StepId;
-  usageAnchor?: UsageAnchorMetadata;
-  provider?: Record<string, unknown>;
-}
-
-export interface ContextItemEnvelope {
-  id: string;
-  message: Message;
-  metadata: ContextItemMetadata;
-}
+export type ContextItemMetadata = ResponseItemMetadata & { usageAnchor?: UsageAnchorMetadata };
+/** @deprecated Compatibility name. ResponseItemEnvelope is canonical. */
+export type ContextItemEnvelope = ResponseItemEnvelope;
 
 export interface WorldStatePayload {
   full: boolean;

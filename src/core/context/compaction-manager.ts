@@ -1,4 +1,5 @@
 import type { AgentContext, CompletedTaskSummary, Message, Task } from "../../types.js";
+import { buildSpecPlan } from "../../tools/spec-plan.js";
 import { createCompactionId, createRequestId, type StepId, type TurnId } from "../../protocol/ids.js";
 import type {
   ModelEvent, ModelMessage, ModelRequest, ModelToolDefinition, ModelTransport, RemoteCompactionRequest,
@@ -207,7 +208,7 @@ export class CompactionManager {
     this.options.context.installCheckpoint(checkpoint, checkpointRecord.ordinal);
     const compHash = fingerprint({
       model: this.options.ctx.config.model.model,
-      instructions: this.options.ctx.agentMemories ?? "",
+      instructions: this.options.ctx.contextualFragments?.map((fragment) => fragment.hash).join(":") ?? this.options.ctx.agentMemories ?? "",
       tools: this.options.ctx.registry.visibleSpecs(),
       permissions: this.options.ctx.permissionPolicy.fingerprint(),
     });
@@ -426,7 +427,7 @@ function compactContext(input: CompactionRequestContext, durable = false) {
 }
 
 function modelTools(ctx: AgentContext): ModelToolDefinition[] {
-  return ctx.registry.visibleSpecs().map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters }));
+  return [...buildSpecPlan(ctx.registry).definitions];
 }
 
 function toModelMessage(message: Message): ModelMessage {
@@ -434,6 +435,7 @@ function toModelMessage(message: Message): ModelMessage {
     role: message.role, content: message.content,
     ...(message.name ? { name: message.name } : {}),
     ...(message.usage ? { usage: message.usage } : {}),
+    ...(message.reasoning ? { reasoning: message.reasoning } : {}),
     ...(message.toolCalls ? { toolCalls: message.toolCalls } : {}),
     ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
   };
@@ -444,6 +446,7 @@ function fromModelMessage(message: ModelMessage): Message {
     role: message.role, content: message.content,
     ...(message.name ? { name: message.name } : {}),
     ...(message.usage ? { usage: message.usage } : {}),
+    ...(message.reasoning ? { reasoning: message.reasoning } : {}),
     ...(message.toolCalls ? { toolCalls: [...message.toolCalls] } : {}),
     ...(message.toolCallId ? { toolCallId: message.toolCallId } : {}),
   };

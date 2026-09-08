@@ -50,7 +50,8 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 - Phase 3 M4：工作区已有 SessionCoordinator/TurnRunner、输入优先级队列、单 active turn、steer 和取消传播原型，但按当前项目阶段口径仍属于规划/验收中，不能标记为已实现。
 - Phase 3 M5：工作区已有 JSONL Transcript、Resume、copied Fork、reconstruction 和轻量索引原型，但尚未按里程碑标记完成；SQLite、reference/paginated fork、archive/revert、持久化队列/mailbox、L3 trace 等仍按后续阶段规划。设计边界见 [`docs/m5-transcript-resume-fork.md`](docs/m5-transcript-resume-fork.md)。
 - Phase 3 M6：工作区已落地持久化 context checkpoint、pre/mid/manual compaction、local/remote/remote-v2/new-context backend、window lineage、world/reference baseline、replacement-history Resume/Fork/rollback replay 和 durable-before-live 故障边界，并通过 M6 专项测试。由于 M4/M5 尚未按路线图顺序完成发布验收，这里记录为“实现已验证”，不改写整体里程碑发布状态。完整约束与实现映射见 [`docs/m6-context-checkpoint-compaction.md`](docs/m6-context-checkpoint-compaction.md)。
-- M7 及以后：配置/Skills、任务图、多 Agent、Hooks、MCP 和可观测性，规划中。
+- Phase 3 M7：已接入 contextual fragments 的运行时基础（AGENTS/Skills catalog、显式 skill body、world-state fingerprint），但完整配置层 provenance、managed requirements、trust gating 和 Skills enablement 仍未完成，不能标记为 M7 完成。设计见 [`docs/m7-config-agents-skills.md`](docs/m7-config-agents-skills.md)。
+- M8 及以后：任务图、多 Agent、Hooks、MCP 和可观测性，规划中。
 
 ## 功能更新日志
 
@@ -204,7 +205,7 @@ COMPACTION_TIMEOUT_MS=60000
 COMPACTION_MAX_RETRIES=2
 ```
 
-配置优先级为：内置默认值、用户级 `~/.swe-agent/config.toml`、项目级 `.swe-agent/config.toml`、`.env`/环境变量/CLI 覆盖，后者优先级最高。
+当前已实现的原型配置优先级为：内置默认值、用户级 `~/.swe-agent/config.toml`、cwd 项目级 `.swe-agent/config.toml`、`.env`/环境变量/调用方覆盖，后者优先级最高。当前 local 层会重新带入默认值，可能覆盖 user/project；完整 TOML、provenance、managed requirements、project trust 与 session flags 尚待 M7 修复，不能把本段当作目标架构。目标设计见 [`docs/m7-config-agents-skills.md`](docs/m7-config-agents-skills.md)。
 
 ## 测试与构建
 

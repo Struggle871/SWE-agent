@@ -940,27 +940,30 @@ checkpoint只在backend成功且replacement校验通过后安装。Resume/Fork/r
 - context overflow、transient retry、timeout、interrupt、invalid replacement、schema migration和no-progress均有故障注入测试。
 - `npm run check`通过；FakeModel不得替代真实request shape、streaming usage、retry或remote parity验证。
 
-## 10. M7：配置、AGENTS.md、CLAUDE.md 与 Skills
+## 10. M7：配置、AGENTS 与 Skills
 
 预计：4 到 6 个开发日。
 
 目标：让配置有来源、有约束、可解释。
 
+完整的 Codex 源码对照、当前差距、协议、M6 集成和测试矩阵见 [m7-config-agents-skills.md](./m7-config-agents-skills.md)。本节只保留实施摘要；M7 当前为“基础运行时已接入、完整能力待实现”。
+
 ### 10.1 配置层
 
-按以下优先级：
+普通配置按以下优先级：
 
 ```text
 packaged defaults
-< system/managed requirements
+< system defaults
+< enterprise managed defaults
 < user
-< project
-< local env
-< session flags
-< CLI overrides
+< profile
+< project root ... cwd
+< explicit env compatibility patch
+< session flags（包含 CLI overrides）
 ```
 
-每个字段保留来源 provenance。修复当前 local 默认值覆盖 user/project 的问题：local 层只包含用户实际设置的字段，不能重新注入完整默认配置。
+`ManagedRequirements` 是独立、不可被放宽的约束平面，不是普通覆盖层。每个字段保留 provenance；每层保留 version 和 disabled reason。修复当前 local 默认值覆盖 user/project 的问题：env compatibility 层只包含用户实际设置的字段，不能重新注入完整默认配置。project layers 从 root 到 cwd 加载，信任判断和 root markers 只由 non-project 配置决定。
 
 ### 10.2 严格配置校验
 
@@ -973,34 +976,34 @@ packaged defaults
 - managed constraint 冲突。
 - secret 不进入日志。
 
-### 10.3 AGENTS / CLAUDE
+### 10.3 AGENTS
 
-- project root 到 cwd 分层发现。
-- provenance。
-- UTF-8 安全截断。
-- 候选文件配置。
-- nested cwd 规则。
-- 多 workspace 环境标签。
-- 项目指令不能提升自身权限。
+- 每目录按 `AGENTS.override.md > AGENTS.md > configured fallbacks` 只选择一个普通文件；`CLAUDE.md` 仅作为显式 compatibility fallback。
+- trusted project 内从 project root 到 cwd 分层发现，保留 source/environment/cwd provenance。
+- 使用受 workspace/sandbox 约束的读取 API 和共享字节预算，截断必须按 UTF-8 bytes 安全完成。
+- 作为 user-role contextual fragment 注入，以 snapshot replacement/removal 更新，不拼入 system prompt。
+- 纳入 M6 world state、reference context 和 Resume/Fork replay；项目指令不能提升自身权限。
 
 ### 10.4 Skills
 
 首版只做本地 `SKILL.md`：
 
-- frontmatter 校验。
-- name/description。
-- 显式提及触发。
-- 内容预算。
-- supporting file 相对路径。
-- 不允许 skill 绕过 approval 和 workspace policy。
+- 区分常驻 developer metadata catalog、显式选中后的 user-role body 和按需 supporting resources。
+- frontmatter 校验、canonical path identity、scope、同名冲突和单项错误隔离。
+- 有界 roots/depth/entries/concurrency discovery；enablement 只接受 user/session 规则。
+- catalog 公平降级预算和 selected-body 单项/总预算都进入 M6 token accounting。
+- 只支持显式提及；supporting file/script 仍走 ToolRouter/Executor 完整安全链。
+- Plugin/MCP/provider 和隐式语义 selector 延期，不建立空壳。
 
 ### 10.5 M7 完成标准
 
 - `config explain` 能显示字段最终值和来源。
 - 用户未设置的 env 字段不会覆盖项目配置。
-- nested AGENTS 作用域测试通过。
+- requirements 无法被更高普通层放宽。
+- nested AGENTS 候选、trust、作用域、UTF-8 字节预算和 replacement/removal 测试通过。
 - 无效 skill 不会破坏 session 启动。
-- skill 注入计入 token budget。
+- skill catalog/body 分层、冲突和预算测试通过。
+- config/instructions/skills snapshot 纳入 M6 compHash、checkpoint、Resume/Fork 和 token budget。
 
 ## 11. M8：任务图和多 Agent
 

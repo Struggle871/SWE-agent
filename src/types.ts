@@ -11,20 +11,15 @@ import type { ModelTransport } from "./protocol/model-events.js";
 import type { CallId, RequestId, SessionId, StepId, TurnId } from "./protocol/ids.js";
 import type { Usage as ProtocolUsage } from "./protocol/usage.js";
 import type { TurnTerminalReason } from "./core/events.js";
+import type { CanonicalMessage } from "./protocol/items.js";
+import type { ContextFragment } from "./config/skills.js";
 
-export type Role = "system" | "user" | "assistant" | "tool";
+export type Role = "system" | "developer" | "user" | "assistant" | "tool";
 
 export type Usage = ProtocolUsage;
 
-export interface Message {
-  role: Role;
-  content: string;
-  name?: string;
-  usage?: Usage;
-  requestId?: RequestId;
-  toolCalls?: Array<{ callId: CallId; name: string; input: unknown }>;
-  toolCallId?: CallId;
-}
+/** @deprecated Use ResponseItemEnvelope at protocol/context boundaries. */
+export type Message = CanonicalMessage;
 
 export type CompactionBackendPreference = "auto" | "local" | "remote" | "remote_v2" | "new_context";
 export type AutoCompactTokenLimitScope = "total" | "body_after_prefix";
@@ -80,6 +75,8 @@ export interface AgentStep {
   stepId?: StepId;
   requestId?: RequestId;
   usage?: Usage;
+  reasoning?: string;
+  finishReason?: string;
   continueReason?: import("./core/events.js").ContinueReason;
 }
 
@@ -101,6 +98,7 @@ export interface ShellResult {
   stderr: string;
   exitCode: number | null;
   timedOut?: boolean;
+  executionId?: string;
 }
 
 export interface AgentContext {
@@ -112,6 +110,7 @@ export interface AgentContext {
   workingMemory: Record<string, unknown>;
   /** CLAUDE.md / AGENTS.md 合并内容，注入 system prompt */
   agentMemories?: string;
+  contextualFragments?: readonly ContextFragment[];
   /** 文件状态缓存：记录已读文件内容与 mtime，用于「编辑前必须读取」校验 */
   fileStateCache: FileStateCache;
   workspacePolicy: WorkspacePolicy;

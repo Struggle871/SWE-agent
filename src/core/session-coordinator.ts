@@ -13,9 +13,12 @@ import { ContextManager } from "./context/context-manager.js";
 import { CompactionFailure, CompactionManager, type CompactionRequestContext } from "./context/compaction-manager.js";
 import type { CompactionHooks, CompactionResult, WorldStatePayload } from "./context/compaction-types.js";
 import { ToolResultStorage } from "./context/tool-result-storage.js";
-import { buildWorldState, referenceContext, renderWorldState, worldStateDiff } from "./context/world-state.js";
-import { fingerprint, requestFingerprint } from "./context/token-accounting.js";
+import { buildWorldState, contextCompatibilityFingerprint, referenceContext, renderWorldState, worldStateDiff } from "./context/world-state.js";
+import { requestFingerprint } from "./context/token-accounting.js";
 import { buildSpecPlan } from "../tools/spec-plan.js";
+import { TaskGraphStore } from "./task-graph.js";
+import { AgentManager } from "./agent-manager.js";
+import { HookEngine } from "./hook-engine.js";
 
 type PendingWork =
   | { type: "run"; request: string; signal?: AbortSignal; resolve: (result: AgentRunResult) => void; reject: (error: unknown) => void }
@@ -29,10 +32,13 @@ export interface SessionCoordinatorOptions {
   writer?: RolloutWriter;
   restoredState?: ReconstructedSession;
   compactionHooks?: CompactionHooks;
+  initialMessages?: readonly Message[];
 }
 
 /** Serializes turns and owns the only live context, persistence, compaction, and cancellation. */
 export class SessionCoordinator {
+  private readonly ctx: AgentContext;
+  private readonly sourceContext: AgentContext;
   private readonly sessionId: SessionId;
   private readonly sessionController = new AbortController();
   private readonly queue = new InputQueue<PendingWork>();
@@ -43,6 +49,7 @@ export class SessionCoordinator {
   private readonly compaction: CompactionManager;
   private readonly toolResults: ToolResultStorage;
   private readonly restoredState?: ReconstructedSession;
+  private readonly initialMessages: readonly Message[];
   private readonly isNew: boolean;
   private state: SessionState = "created";
   private active = false;
@@ -54,15 +61,30 @@ export class SessionCoordinator {
   private pendingApprovalRequestId: string | undefined;
 
   constructor(
-    private readonly ctx: AgentContext,
+    ctx: AgentContext,
     private readonly onEvent?: (event: AgentEvent) => void,
     options: SessionCoordinatorOptions = {},
   ) {
+    this.sourceContext = ctx;
+    this.ctx = {
+      ...ctx,
+      workingMemory: structuredClone(ctx.workingMemory),
+      taskGraph: undefined,
+      agentManager: undefined,
+      hooks: undefined,
+    };
     const transcriptRoot = options.transcriptRoot ?? path.join(ctx.workspaceRoot, ".swe-agent", "sessions");
     const store = new TranscriptStore(transcriptRoot);
     this.restoredState = options.restoredState;
+    this.initialMessages = options.initialMessages ? options.initialMessages.map((message) => structuredClone(message)) : [];
     this.sessionId = options.sessionId ?? options.restoredState?.sessionId ?? createSessionId();
+    this.ctx.sessionId = this.sessionId;
+    this.ctx.taskGraph = new TaskGraphStore(path.join(transcriptRoot, "tasks", `${this.sessionId}.json`), (event) => { void this.persist("task_event", event).catch(() => undefined); });
+    this.ctx.agentManager = new AgentManager(this.ctx, path.join(transcriptRoot, "agents", this.sessionId), (event) => this.handleEvent(event), () => this.context?.messages() ?? []);
     this.writer = options.writer ?? store.createWriter(this.sessionId);
+    this.ctx.hooks = new HookEngine(ctx.config.hooks ?? [], {
+      onLifecycle: (record) => this.persist("hook_lifecycle", record).then(() => undefined).catch(() => undefined),
+    });
     this.context = new ContextManager(options.restoredState ? {
       items: options.restoredState.annotatedHistory,
       window: options.restoredState.window,
@@ -73,14 +95,25 @@ export class SessionCoordinator {
     } : undefined);
     this.toolResults = new ToolResultStorage(path.join(transcriptRoot, "artifacts", this.sessionId));
     this.compaction = new CompactionManager({
-      ctx,
+      ctx: this.ctx,
       context: this.context,
       persist: (kind, payload, context) => this.persist(kind, payload, context),
-      hooks: options.compactionHooks,
-      onLifecycle: (status, payload) => this.onEvent?.({ type: "compaction", status, ...payload }),
+      hooks: {
+        preCompact: async (event, signal) => {
+          const configured = await this.ctx.hooks?.dispatch("PreCompact", event as unknown as Record<string, unknown>, this.ctx, signal);
+          const custom = await options.compactionHooks?.preCompact?.(event, signal);
+          return configured?.blocked || custom === "stop" ? "stop" : "continue";
+        },
+        postCompact: async (event, signal) => {
+          const configured = await this.ctx.hooks?.dispatch("PostCompact", event as unknown as Record<string, unknown>, this.ctx, signal);
+          const custom = await options.compactionHooks?.postCompact?.(event, signal);
+          return configured?.blocked || custom === "stop" ? "stop" : "continue";
+        },
+      },
+      onLifecycle: (status, payload) => this.handleEvent({ type: "compaction", status, ...payload }),
     });
     this.isNew = !options.restoredState;
-    this.turnRunner = new TurnRunner(ctx);
+    this.turnRunner = new TurnRunner(this.ctx);
   }
 
   run(request: string, signal?: AbortSignal): Promise<AgentRunResult> {
@@ -107,13 +140,18 @@ export class SessionCoordinator {
     });
   }
 
-  interrupt(reason = "用户中断"): void { this.activeTurnController?.abort(new Error(reason)); }
+  interrupt(reason = "用户中断"): void {
+    this.activeTurnController?.abort(new Error(reason));
+    this.ctx.agentManager?.cancelAll(reason);
+    void this.ctx.hooks?.dispatch("Interrupt", { sessionId: this.sessionId, reason }, this.ctx).catch(() => undefined);
+  }
   steer(text: string): void {
     if (this.state !== "closing" && this.state !== "closed") this.steerQueue.push("steer", text);
   }
   shutdown(reason = "session shutdown"): void {
     if (!this.sessionController.signal.aborted) this.sessionController.abort(new Error(reason));
     this.activeTurnController?.abort(new Error(reason));
+    this.ctx.agentManager?.cancelAll(reason);
     this.setState("closing");
     if (!this.pumpStarted) {
       this.setState("closed");
@@ -137,6 +175,7 @@ export class SessionCoordinator {
   get id(): SessionId { return this.sessionId; }
   get transcriptPath(): string { return this.writer.filePath; }
   get recovery(): ReconstructedSession | undefined { return this.restoredState; }
+  get tasks() { return this.ctx.taskGraph?.list() ?? []; }
 
   private startPump(): void {
     if (this.pumpStarted) return;
@@ -147,12 +186,17 @@ export class SessionCoordinator {
   private async initialize(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
+    await this.ctx.taskGraph?.load();
+    await this.ctx.agentManager?.load();
+    const startHook = await this.ctx.hooks?.dispatch("SessionStart", { sessionId: this.sessionId, cwd: this.ctx.workspaceRoot }, this.ctx);
+    if (startHook?.blocked) throw new Error(startHook.reason ?? "SessionStart hook blocked session");
     if (this.isNew) {
       await this.writer.append("session_meta", {
         cwd: this.ctx.workspaceRoot,
         model: this.ctx.config.model.model,
         initialWindowId: this.context.window.snapshot().windowId,
       }, { durable: true });
+      for (const message of this.initialMessages) await this.appendMessage(message, {});
     } else if (this.restoredState && (this.restoredState.incompleteTurnIds.length > 0 || this.restoredState.unknownOutcomes.length > 0)) {
       const marker = {
         incompleteTurnIds: this.restoredState.incompleteTurnIds,
@@ -164,8 +208,8 @@ export class SessionCoordinator {
         content: `上次会话被中断。未完成 turn: ${marker.incompleteTurnIds.length}；结果未知的工具调用: ${marker.unknownOutcomeCallIds.join(", ") || "无"}。不得自动重放这些工具调用。`,
       }, {});
     }
-    this.onEvent?.({ type: "session_started", sessionId: this.sessionId });
-    this.onEvent?.({ type: "session_state_changed", sessionId: this.sessionId, state: "created" });
+    this.handleEvent({ type: "session_started", sessionId: this.sessionId });
+    this.handleEvent({ type: "session_state_changed", sessionId: this.sessionId, state: "created" });
   }
 
   private async pump(): Promise<void> {
@@ -201,27 +245,51 @@ export class SessionCoordinator {
       this.setState("closed");
       this.rejectPending(this.persistenceError ? `Session 持久化失败: ${errorText(this.persistenceError)}` : "Session 已关闭");
       await this.writer.shutdown().catch((error) => { this.persistenceError ??= error; });
+      await this.ctx.agentManager?.close().catch((error) => { this.persistenceError ??= error; });
+      await this.ctx.hooks?.dispatch("SessionEnd", { sessionId: this.sessionId, state: this.state }, this.ctx).catch(() => undefined);
     }
   }
 
   private async runPending(pending: Extract<PendingWork, { type: "run" }>): Promise<void> {
+    this.syncExternalContext();
     const signal = linkedSignal(this.sessionController.signal, pending.signal, this.activeTurnController?.signal);
-    const result = await this.turnRunner.run({
-      sessionId: this.sessionId,
-      userRequest: pending.request,
-      signal,
-      context: this.context,
-      consumeSteer: () => this.steerQueue.take()?.value,
-      maybeCompact: (input) => this.maybeCompact(input),
-      prepareContext: (context) => this.ensureContextBaseline(context),
-      appendMessage: (message, context) => this.appendMessage(message, context),
-      persistToolResult: (call, context) => this.persistToolResult(call, context),
-      persist: async (kind, payload, context) => { await this.persist(kind, payload, context); },
-      onEvent: (event) => this.handleEvent(event),
-    });
-    await this.flush();
-    this.active = false;
-    pending.resolve({ ...result, history: this.context.messages() });
+    try {
+      const result = await this.turnRunner.run({
+        sessionId: this.sessionId,
+        userRequest: pending.request,
+        signal,
+        context: this.context,
+        consumeSteer: () => this.steerQueue.take()?.value,
+        maybeCompact: (input) => this.maybeCompact(input),
+        prepareContext: (context) => this.ensureContextBaseline(context),
+        appendMessage: (message, context) => this.appendMessage(message, context),
+        persistToolResult: (call, context) => this.persistToolResult(call, context),
+        persist: async (kind, payload, context) => { await this.persist(kind, payload, context); },
+        onEvent: (event) => this.handleEvent(event),
+      });
+      await this.ctx.hooks?.dispatch("Stop", { sessionId: this.sessionId, turnId: result.turnId, reason: result.terminalReason }, this.ctx, signal);
+      await this.flush();
+      this.active = false;
+      pending.resolve({ ...result, history: this.context.messages() });
+    } catch (error) {
+      await this.ctx.hooks?.dispatch("Stop", { sessionId: this.sessionId, reason: errorText(error), failed: true }, this.ctx, signal).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private syncExternalContext(): void {
+    const source = this.sourceContext;
+    this.ctx.agentMemories = source.agentMemories;
+    this.ctx.contextualFragments = source.contextualFragments;
+    this.ctx.instructionSnapshot = source.instructionSnapshot;
+    this.ctx.skillSnapshot = source.skillSnapshot;
+    this.ctx.selectedSkills = source.selectedSkills;
+    this.ctx.configStack = source.configStack;
+    this.ctx.contextFileSystem = source.contextFileSystem;
+    this.ctx.skillPlatform = source.skillPlatform;
+    this.ctx.skillTokenizer = source.skillTokenizer;
+    this.ctx.config = source.config;
+    this.ctx.hooks?.replace(source.config.hooks ?? []);
   }
 
   private async compactPending(pending: Extract<PendingWork, { type: "compact" }>): Promise<void> {
@@ -340,7 +408,7 @@ export class SessionCoordinator {
     });
     await this.persist("message", { item }, context);
     this.context.recordPersisted(item);
-    this.onEvent?.({ type: "response_item", sessionId: this.sessionId, ...(context.turnId ? { turnId: context.turnId } : {}), ...(context.stepId ? { stepId: context.stepId } : {}), item });
+    this.handleEvent({ type: "response_item", sessionId: this.sessionId, ...(context.turnId ? { turnId: context.turnId } : {}), ...(context.stepId ? { stepId: context.stepId } : {}), item });
     return structuredClone(normalized);
   }
 
@@ -375,15 +443,13 @@ export class SessionCoordinator {
   }
 
   private compHash(): string {
-    return fingerprint({
-      model: this.ctx.config.model.model,
-      instructions: this.ctx.contextualFragments?.map((fragment) => fragment.hash).join(":") ?? this.ctx.agentMemories ?? "",
-      tools: this.ctx.registry.visibleSpecs(),
-      permissions: this.ctx.permissionPolicy.fingerprint(),
-    });
+    return contextCompatibilityFingerprint({ ctx: this.ctx, tools: this.ctx.registry.visibleSpecs() });
   }
 
   private handleEvent(event: AgentEvent): void {
+    this.ctx.observability?.onEvent(event);
+    if (event.type === "subagent_started") this.enqueuePersistence("agent_event", { agentId: event.agentId, event: "started", ...(event.parentSessionId ? { parentSessionId: event.parentSessionId } : {}), prompt: event.prompt });
+    if (event.type === "subagent_completed") this.enqueuePersistence("agent_event", { agentId: event.agentId, event: "completed", status: event.status, ...(event.result ? { result: event.result } : {}), ...(event.error ? { error: event.error } : {}) });
     if (event.type === "approval_requested") {
       this.setState("waiting_approval");
       this.pendingApprovalRequestId = event.request.requestId;
@@ -413,7 +479,7 @@ export class SessionCoordinator {
   private setState(state: SessionState): void {
     if (this.state === state) return;
     this.state = state;
-    this.onEvent?.({ type: "session_state_changed", sessionId: this.sessionId, state });
+    this.handleEvent({ type: "session_state_changed", sessionId: this.sessionId, state });
   }
   private rejectPending(message: string): void {
     let entry: ReturnType<InputQueue<PendingWork>["take"]>;

@@ -17,6 +17,22 @@ test("registry rejects duplicate names and exposes specs separately from runtime
   assert.throws(() => registry.register(tool), ToolConfigurationError);
 });
 
+test("registry generation waits for in-flight runtime leases before draining", async () => {
+  const registry = new ToolRegistry();
+  registry.registerDefinition({ spec: { name: "leased", description: "leased", isReadOnly: true, parameters: { type: "object", properties: {} } }, runtime: { async execute() { return { toolName: "leased", output: "old" }; } }, source: "plugin-tool:old" });
+  const lease = registry.acquireRegistration("leased");
+  assert.ok(lease);
+  const replacement = registry.replaceSourcesWithDrain(["plugin-tool:"], [{ spec: { name: "leased", description: "leased", isReadOnly: true, parameters: { type: "object", properties: {} } }, runtime: { async execute() { return { toolName: "leased", output: "new" }; } }, source: "plugin-tool:new" }]);
+  let drained = false;
+  void replacement.drained.then(() => { drained = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(drained, false);
+  lease!.release();
+  await replacement.drained;
+  assert.equal(drained, true);
+  assert.equal(registry.getRegistration("leased")?.source, "plugin-tool:new");
+});
+
 test("router reports schema field paths and does not invoke runtime", async (t) => {
   const ctx = await makeContext(await makeWorkspace());
   t.after(() => cleanupContext(ctx));

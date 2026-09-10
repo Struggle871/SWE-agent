@@ -16,7 +16,8 @@ import { CompactionFailure, type CompactionRequestContext } from "./context/comp
 import type { CompactionResult } from "./context/compaction-types.js";
 import type { ToolResult } from "../types.js";
 import { buildSpecPlan, type SpecPlan } from "../tools/spec-plan.js";
-import { loadSkillFragments } from "../config/skills.js";
+import { extractSkillMentions } from "../config/skills.js";
+import { refreshContextualFragments } from "../config/context-loader.js";
 
 export interface TurnRunnerOptions {
   sessionId: SessionId;
@@ -46,13 +47,29 @@ export class TurnRunner {
   async run(options: TurnRunnerOptions): Promise<AgentRunResult> {
     const { ctx } = this;
     const turnId = createTurnId();
+    const explicitSkills = extractSkillMentions(options.userRequest);
+    const promptHook = await ctx.hooks?.dispatch("UserPromptSubmit", { text: options.userRequest, sessionId: options.sessionId }, ctx, options.signal);
+    if (promptHook?.blocked) throw new Error(promptHook.reason ?? "UserPromptSubmit hook blocked request");
+    const refreshed = await refreshContextualFragments(ctx, explicitSkills, options.userRequest);
+    const selectionErrors = refreshed.diagnostics.filter((diagnostic) => diagnostic.severity === "error");
+    if (selectionErrors.length > 0) throw new Error(selectionErrors.map((diagnostic) => diagnostic.message).join("；"));
     const history: Message[] = options.context.messages();
     const trace: AgentStep[] = [];
     const completedTasks: CompletedTaskSummary[] = [];
     const specPlan: SpecPlan = buildSpecPlan(ctx.registry);
-    const explicitSkills = [...options.userRequest.matchAll(/\$([A-Za-z0-9_-]+)/g)].map((match) => match[1]);
-    const contextualFragments = [...(ctx.contextualFragments ?? []), ...loadSkillFragments(ctx.workspaceRoot, explicitSkills).filter((fragment) => fragment.type === "skills.body")];
-    const scheduler = new TaskScheduler();
+    const contextualFragments = [...(ctx.contextualFragments ?? [])];
+    const memories = ctx.memoryStore?.relevant(options.userRequest) ?? [];
+    if (memories.length > 0) {
+      const memoryText = boundedMemoryText(memories, ctx, Math.min(1_500, Math.max(256, Math.floor(ctx.config.maxContextTokens * 0.1))));
+      contextualFragments.push({
+        role: "user",
+        type: "memory.retrieval",
+        text: `<relevant_memory>\n${memoryText}\n</relevant_memory>`,
+        hash: `memory:${ctx.memoryStore?.fingerprint() ?? ""}`,
+        source: "memory-store",
+      });
+    }
+    const scheduler = new TaskScheduler(ctx.taskGraph);
     let steps = 0;
     let currentTask: Task | undefined;
     let terminalReason: TurnTerminalReason = "failed";
@@ -60,7 +77,8 @@ export class TurnRunner {
 
     await options.persist?.("turn_started", { userRequest: options.userRequest }, { turnId });
     this.emit(options, { type: "turn_started", sessionId: options.sessionId, turnId });
-    const userMessage: Message = { role: "user", content: options.userRequest };
+    const userMessage: Message = { role: "user", content: String(promptHook?.rewrittenInput?.text ?? options.userRequest) };
+    if (promptHook?.additionalContext) contextualFragments.push({ role: "user", type: "agents_md.instructions", text: promptHook.additionalContext, hash: "hook-context", source: "hook" });
     this.setState(options, turnId, "preflight_context");
 
     try {
@@ -84,7 +102,7 @@ export class TurnRunner {
       while (steps < ctx.config.maxSteps) {
         throwIfAborted(options.signal);
         if (!currentTask) {
-          currentTask = scheduler.next();
+          currentTask = scheduler.next(options.sessionId);
           if (!currentTask) {
             terminalReason = "task_queue_empty";
             finalAnswer = "任务队列为空，任务未完成。";
@@ -169,7 +187,7 @@ export class TurnRunner {
               onToolCallCompleted: (call) => options.persistToolResult(call, { turnId, stepId }),
               onEvent: (event) => {
                 if (event.type === "tool_use_started") this.setState(options, turnId, "dispatching_tools");
-                this.emit(options, event);
+                this.emit(options, event.type === "model_event" ? { ...event, sessionId: options.sessionId, turnId, stepId } : event);
               },
             });
           } catch (error) {
@@ -197,7 +215,7 @@ export class TurnRunner {
           const action = step.action;
           trace.push(this.traceStep(stepIndex, step, options.sessionId, turnId, stepId));
           if (action.type === "final_answer") {
-            task.status = "done";
+            scheduler.taskGraph.complete(task.id, action.answer);
             completedTasks.push({ description: task.description, result: action.answer });
             finalAnswer = action.answer;
             this.emit(options, { type: "final_answer", answer: action.answer });
@@ -287,6 +305,18 @@ function throwIfAborted(signal: AbortSignal): void {
 
 function reasonText(reason: unknown): string {
   return reason instanceof Error ? reason.message : reason ? String(reason) : "外部中断";
+}
+
+function boundedMemoryText(memories: readonly import("./memory-store.js").MemoryRecord[], ctx: AgentContext, maxTokens: number): string {
+  const lines: string[] = [];
+  for (const memory of memories) {
+    const line = `[${memory.kind}; confidence=${memory.confidence.toFixed(2)}; provenance=${memory.provenance}] ${memory.content}`;
+    const candidate = [...lines, line].join("\n");
+    const tokens = ctx.skillTokenizer?.count(candidate, ctx.config.model.model) ?? Math.ceil(candidate.length / 4);
+    if (tokens > maxTokens) break;
+    lines.push(line);
+  }
+  return lines.join("\n");
 }
 
 function toModelMessage(message: Message): ModelMessage {

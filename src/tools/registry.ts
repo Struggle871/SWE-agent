@@ -10,6 +10,9 @@ export class ToolConfigurationError extends Error {
 
 export class ToolRegistry {
   private tools = new Map<string, ToolRegistration>();
+  private generation = 0;
+  private readonly activeLeases = new Map<ToolRegistration, number>();
+  private readonly drainWaiters = new Map<ToolRegistration, Set<() => void>>();
 
   register(tool: Tool): void {
     const { execute: _execute, ...spec } = tool;
@@ -25,7 +28,45 @@ export class ToolRegistry {
     const key = qualifiedName(registration.spec);
     if (this.tools.has(key)) throw new ToolConfigurationError(`工具名称冲突: ${key}`);
     this.tools.set(key, registration);
+    this.generation += 1;
   }
+
+  replaceSources(sourcePrefixes: readonly string[], registrations: readonly ToolRegistration[]): number {
+    return this.replaceSourcesWithDrain(sourcePrefixes, registrations).generation;
+  }
+
+  replaceSourcesWithDrain(sourcePrefixes: readonly string[], registrations: readonly ToolRegistration[]): { generation: number; drained: Promise<void> } {
+    const retired = [...this.tools.values()].filter((registration) => sourcePrefixes.some((prefix) => (registration.source ?? "").startsWith(prefix)));
+    const next = new Map([...this.tools].filter(([, registration]) => !sourcePrefixes.some((prefix) => (registration.source ?? "").startsWith(prefix))));
+    for (const registration of registrations) {
+      validateToolSpec(registration.spec);
+      const key = qualifiedName(registration.spec);
+      if (next.has(key)) throw new ToolConfigurationError(`工具名称冲突: ${key}`);
+      next.set(key, registration);
+    }
+    this.tools = next;
+    return { generation: ++this.generation, drained: Promise.all(retired.map((registration) => this.waitUntilDrained(registration))).then(() => undefined) };
+  }
+
+  acquireRegistration(name: string): { registration: ToolRegistration; release: () => void } | undefined {
+    const registration = this.resolve(name);
+    if (!registration) return undefined;
+    this.activeLeases.set(registration, (this.activeLeases.get(registration) ?? 0) + 1);
+    let released = false;
+    return { registration, release: () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.activeLeases.get(registration) ?? 1) - 1;
+      if (remaining > 0) this.activeLeases.set(registration, remaining);
+      else {
+        this.activeLeases.delete(registration);
+        for (const resolve of this.drainWaiters.get(registration) ?? []) resolve();
+        this.drainWaiters.delete(registration);
+      }
+    } };
+  }
+
+  get currentGeneration(): number { return this.generation; }
 
   get(name: string): ToolSpec | undefined {
     return this.resolve(name)?.spec;
@@ -45,6 +86,16 @@ export class ToolRegistry {
 
   list(): ToolSpec[] {
     return [...this.tools.values()].map((registration) => registration.spec);
+  }
+
+  status(): Array<{ name: string; namespace?: string; source: string; exposure: string; readOnly: boolean }> {
+    return [...this.tools.values()].map((registration) => ({
+      name: qualifiedName(registration.spec),
+      ...(registration.spec.namespace ? { namespace: registration.spec.namespace } : {}),
+      source: registration.source ?? "unknown",
+      exposure: registration.spec.exposure ?? "direct",
+      readOnly: registration.spec.isReadOnly === true,
+    })).sort((a, b) => a.name.localeCompare(b.name));
   }
 
   visibleSpecs(): ToolSpec[] {
@@ -70,6 +121,15 @@ export class ToolRegistry {
     if (exact || name.includes(".")) return exact;
     const matches = [...this.tools.entries()].filter(([key]) => key.endsWith(`.${name}`));
     return matches.length === 1 ? matches[0][1] : undefined;
+  }
+
+  private waitUntilDrained(registration: ToolRegistration): Promise<void> {
+    if ((this.activeLeases.get(registration) ?? 0) === 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      const waiters = this.drainWaiters.get(registration) ?? new Set<() => void>();
+      waiters.add(resolve);
+      this.drainWaiters.set(registration, waiters);
+    });
   }
 }
 

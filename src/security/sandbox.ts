@@ -43,6 +43,9 @@ export interface SandboxProfile {
 
 export interface SandboxRequest {
   command: string;
+  /** Structured process invocation for trusted runtimes. `command` remains the
+   * audited preview while argv avoids shell quoting and injection ambiguity. */
+  argv?: { executable: string; args: string[] };
   cwd: string;
   timeoutMs: number;
   signal?: AbortSignal;
@@ -160,8 +163,8 @@ export class LocalSandboxProvider implements SandboxProvider {
     const cwd = path.resolve(request.cwd);
     if (!isWithin(this.root, cwd)) throw new SandboxCapabilityError(["workspace cwd"]);
     if (request.signal?.aborted) throw request.signal.reason ?? new Error("沙箱执行已取消");
-    const shell = process.platform === "win32" ? (process.env.COMSPEC ?? "cmd.exe") : "/bin/bash";
-    const args = process.platform === "win32" ? ["/d", "/s", "/c", request.command] : ["--noprofile", "--norc", "-c", request.command];
+    const shell = request.argv?.executable ?? (process.platform === "win32" ? (process.env.COMSPEC ?? "cmd.exe") : "/bin/bash");
+    const args = request.argv?.args ?? (process.platform === "win32" ? ["/d", "/s", "/c", request.command] : ["--noprofile", "--norc", "-c", request.command]);
     const env = filteredEnvironment(request.env);
     return new Promise<SandboxResult>((resolve, reject) => {
       const child = spawn(shell, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
@@ -284,7 +287,7 @@ export class WindowsDockerSandboxProvider implements SandboxProvider {
       "--workdir", containerCwd,
       "--user", "node",
       ...dockerEnvironment(request.env),
-      this.image, "/bin/sh", "-lc", request.command,
+      this.image, ...(request.argv ? containerArgv(request.argv, this.root) : ["/bin/sh", "-lc", request.command]),
     ];
 
     return new Promise<SandboxResult>((resolve, reject) => {
@@ -360,6 +363,14 @@ export class WindowsDockerSandboxProvider implements SandboxProvider {
   }
 }
 
+function containerArgv(argv: NonNullable<SandboxRequest["argv"]>, workspaceRoot: string): string[] {
+  return [argv.executable, ...argv.args.map((value) => {
+    const absolute = path.resolve(value);
+    if (!path.isAbsolute(value) || !isWithin(workspaceRoot, absolute)) return value;
+    return `/workspace/${path.relative(workspaceRoot, absolute).replace(/\\/g, "/")}`;
+  })];
+}
+
 export class UnavailableSandboxProvider implements SandboxProvider {
   capabilities(): SandboxCapabilities {
     return unavailableCapabilities();
@@ -392,7 +403,7 @@ export function sandboxProfileFingerprint(profile: SandboxProfile): string {
 }
 
 function filteredEnvironment(patch?: Record<string, string>): NodeJS.ProcessEnv {
-  const allowed = new Set(["PATH", "Path", "PATHEXT", "SYSTEMROOT", "SystemRoot", "COMSPEC", "ComSpec", "TEMP", "TMP", "HOME", "USERPROFILE", "LANG", "LC_ALL"]);
+  const allowed = new Set(["PATH", "Path", "PATHEXT", "SYSTEMROOT", "SystemRoot", "COMSPEC", "ComSpec", "TEMP", "TMP", "HOME", "USERPROFILE", "LANG", "LC_ALL", "SWE_SKILL_INPUT_JSON", "SWE_SKILL_ARGS_JSON", "SWE_HOOK_EVENT", "SWE_HOOK_INPUT_JSON"]);
   const env: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(process.env)) if (allowed.has(key) && value !== undefined) env[key] = value;
   for (const [key, value] of Object.entries(patch ?? {})) if (allowed.has(key)) env[key] = value;
@@ -400,7 +411,7 @@ function filteredEnvironment(patch?: Record<string, string>): NodeJS.ProcessEnv 
 }
 
 function dockerEnvironment(patch?: Record<string, string>): string[] {
-  const allowed = new Set(["CI", "LANG", "LC_ALL", "TZ", "NODE_ENV"]);
+  const allowed = new Set(["CI", "LANG", "LC_ALL", "TZ", "NODE_ENV", "SWE_SKILL_INPUT_JSON", "SWE_SKILL_ARGS_JSON"]);
   const env = Object.fromEntries(Object.entries(patch ?? {}).filter(([key]) => allowed.has(key)));
   return Object.entries(env).flatMap(([key, value]) => ["--env", `${key}=${value}`]);
 }

@@ -13,6 +13,8 @@ import type { Usage as ProtocolUsage } from "./protocol/usage.js";
 import type { TurnTerminalReason } from "./core/events.js";
 import type { CanonicalMessage } from "./protocol/items.js";
 import type { ContextFragment } from "./config/skills.js";
+import type { InstructionSnapshot } from "./config/agents-md.js";
+import type { SelectedSkill, SkillSnapshot } from "./config/skills.js";
 
 export type Role = "system" | "developer" | "user" | "assistant" | "tool";
 
@@ -83,9 +85,17 @@ export interface AgentStep {
 export interface Task {
   id: string;
   description: string;
-  status: "pending" | "in_progress" | "done" | "failed";
+  status: "pending" | "blocked" | "in_progress" | "completed" | "done" | "failed" | "retrying" | "cancelled";
   parentId?: string;
   dependsOn?: string[];
+  ownerSessionId?: SessionId;
+  acceptanceCriteria?: string[];
+  attempts?: number;
+  maxAttempts?: number;
+  budget?: { maxSteps?: number; maxTokens?: number };
+  resultSummary?: string;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export interface CompletedTaskSummary {
@@ -108,9 +118,17 @@ export interface AgentContext {
   model: ModelClient;
   workspaceRoot: string;
   workingMemory: Record<string, unknown>;
-  /** CLAUDE.md / AGENTS.md 合并内容，注入 system prompt */
+  /** @deprecated Legacy JSON/ReAct-only prompt memory; M7 AGENTS use user-role contextual fragments. */
   agentMemories?: string;
   contextualFragments?: readonly ContextFragment[];
+  configStack?: import("./config/layered-config.js").ConfigLayerStack;
+  instructionSnapshot?: InstructionSnapshot;
+  skillSnapshot?: SkillSnapshot;
+  selectedSkills?: readonly SelectedSkill[];
+  contextFileSystem?: import("./config/context-filesystem.js").ContextFileSystem;
+  skillPlatform?: import("./skills/platform.js").SkillPlatform;
+  /** Host-supplied model tokenizer; absent means explicit heuristic fallback. */
+  skillTokenizer?: import("./skills/platform.js").SkillTokenizer;
   /** 文件状态缓存：记录已读文件内容与 mtime，用于「编辑前必须读取」校验 */
   fileStateCache: FileStateCache;
   workspacePolicy: WorkspacePolicy;
@@ -120,6 +138,18 @@ export interface AgentContext {
   auditTrail: AuditTrail;
   /** M3.5 runtime 的可替换沙箱；缺失时 run_command 必须拒绝执行。 */
   sandboxProvider?: SandboxProvider;
+  /** M8 durable task graph shared by the session and task tools. */
+  taskGraph?: import("./core/task-graph.js").TaskGraphStore;
+  /** M8 local child-agent lifecycle and mailbox service. */
+  agentManager?: import("./core/agent-manager.js").AgentManager;
+  hooks?: import("./core/hook-engine.js").HookEngine;
+  memoryStore?: import("./core/memory-store.js").MemoryStore;
+  observability?: import("./core/observability.js").Observability;
+  mcpProviders?: readonly import("./skills/mcp-provider.js").McpSkillProvider[];
+  mcpManager?: import("./skills/mcp-manager.js").McpRuntimeManager;
+  pluginLifecycle?: import("./skills/plugin-manager.js").PluginLifecycleManager;
+  pluginActivation?: import("./skills/plugin-activation.js").PluginActivationManager;
+  sessionId?: SessionId;
 }
 
 export interface AgentConfig {
@@ -129,10 +159,92 @@ export interface AgentConfig {
   toolTimeoutMs: number;
   parseRetry: number;
   workspaceRoot: string;
-  model: { baseUrl: string; apiKey?: string; model: string };
+  model: { baseUrl: string; apiKey?: string; model: string; inputCostPer1k?: number; outputCostPer1k?: number };
   useFakeModel: boolean;
   useLlmPlanning: boolean;
+  sandboxMode?: "unavailable" | "best-effort" | "docker";
+  networkAccess?: "deny" | "allow";
   compaction?: Partial<CompactionConfig>;
+  agents?: AgentsConfig;
+  skills?: SkillsConfig;
+  configFingerprint?: string;
+  requirementsFingerprint?: string;
+  hooks?: HookConfig[];
+}
+
+export type HookEventName = "SessionStart" | "SessionEnd" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PreCompact" | "PostCompact" | "PermissionRequest" | "Interrupt" | "Stop" | "SubagentStart" | "SubagentStop";
+export interface HookConfig {
+  id: string;
+  event: HookEventName;
+  command: string;
+  args?: string[];
+  matcher?: string;
+  timeoutMs?: number;
+  onTimeout?: "allow" | "block";
+  onError?: "allow" | "block";
+  trustedHash?: string;
+}
+
+export interface AgentsConfig {
+  fallbackFilenames?: string[];
+  projectRootMarkers?: string[];
+  maxBytes?: number;
+  projectTrusted?: boolean;
+}
+
+export interface SkillsConfig {
+  repoRoots?: string[];
+  userRoots?: string[];
+  systemRoots?: string[];
+  adminRoots?: string[];
+  maxContextTokens?: number;
+  maxSelectedBodyTokensPerSkill?: number;
+  maxSelectedBodyTokensTotal?: number;
+  enablement?: Record<string, boolean>;
+  includeCodexCompatibilityRoot?: boolean;
+  maxScanDepth?: number;
+  maxEntriesPerRoot?: number;
+  maxSkills?: number;
+  implicitSelection?: boolean;
+  selectorThreshold?: number;
+  selectorMaxResults?: number;
+  pluginRoots?: string[];
+  installRoot?: string;
+  marketplaceRequireHash?: boolean;
+  watch?: boolean;
+  scanConcurrency?: number;
+  cacheTtlMs?: number;
+  selectorMode?: "explicit" | "lexical" | "embedding" | "hybrid";
+  embeddingModel?: string;
+  embeddingBaseUrl?: string;
+  embeddingApiKey?: string;
+  embeddingTimeoutMs?: number;
+  products?: string[];
+  marketplaceIndexes?: string[];
+  mcpServers?: Record<string, SkillMcpServerConfig>;
+  remoteProviders?: Record<string, SkillRemoteProviderConfig>;
+}
+
+export interface SkillRemoteProviderConfig {
+  enabled?: boolean;
+  kind: "executor" | "orchestrator";
+  baseUrl: string;
+  apiKey?: string;
+  timeoutMs?: number;
+}
+
+export interface SkillMcpServerConfig {
+  enabled?: boolean;
+  transport: "stdio" | "http";
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  timeoutMs?: number;
+  resourcePrefixes?: string[];
+  oauth?: { tokenUrl?: string; authorizationUrl?: string; clientId: string; clientSecret?: string; scopes?: string[]; grantType?: "client_credentials" | "authorization_code"; redirectUri?: string };
 }
 
 export type ModelStreamEvent =

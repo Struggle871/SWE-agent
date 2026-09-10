@@ -18,7 +18,7 @@ export type TranscriptKind =
   | "session_meta" | "turn_started" | "turn_completed" | "turn_aborted" | "message"
   | "tool_call" | "tool_result" | "tool_preview" | "approval_requested" | "approval_resolved"
   | "interruption_marker" | "fork_created" | "compaction_lifecycle" | "compact_checkpoint"
-  | "world_state" | "reference_context" | "rollback";
+  | "world_state" | "reference_context" | "rollback" | "hook_lifecycle" | "task_event" | "agent_event";
 
 export interface TranscriptEnvelope {
   schemaVersion: SupportedTranscriptSchemaVersion;
@@ -36,7 +36,7 @@ export type TranscriptPayload =
   | SessionMetaPayload | TurnStartedPayload | TurnCompletedPayload | TurnAbortedPayload | MessagePayload
   | ToolCallPayload | ToolResultPayload | ToolPreviewPayload | ApprovalRequestedPayload | ApprovalResolvedPayload
   | InterruptionMarkerPayload | ForkCreatedPayload | CompactionLifecyclePayload | CompactCheckpointPayload
-  | WorldStatePayload | ReferenceContextPayload | RollbackPayload;
+  | WorldStatePayload | ReferenceContextPayload | RollbackPayload | HookLifecyclePayload | TaskEventPayload | AgentEventPayload;
 
 export interface SessionMetaPayload {
   cwd: string;
@@ -61,11 +61,22 @@ export interface ApprovalResolvedPayload { requestId?: string; result: ApprovalR
 export interface InterruptionMarkerPayload { incompleteTurnIds: TurnId[]; unknownOutcomeCallIds: string[] }
 export interface ForkCreatedPayload { parentSessionId: SessionId; forkedAtOrdinal: number; reason?: string }
 export interface RollbackPayload { throughOrdinal: number; reason?: string }
+export interface HookLifecyclePayload {
+  event: import("../types.js").HookEventName;
+  hookId: string;
+  status: "completed" | "failed" | "blocked" | "skipped";
+  durationMs: number;
+  reason?: string;
+  rewritten: boolean;
+  addedContext: boolean;
+}
+export interface TaskEventPayload { operation: "create" | "update" | "claim" | "complete" | "fail" | "cancel"; task: import("../types.js").Task }
+export interface AgentEventPayload { agentId: string; event: "started" | "completed"; parentSessionId?: string; prompt?: string; status?: "completed" | "failed" | "cancelled"; result?: string; error?: string }
 
 const KINDS = new Set<TranscriptKind>([
   "session_meta", "turn_started", "turn_completed", "turn_aborted", "message", "tool_call", "tool_result",
   "tool_preview", "approval_requested", "approval_resolved", "interruption_marker", "fork_created",
-  "compaction_lifecycle", "compact_checkpoint", "world_state", "reference_context", "rollback",
+  "compaction_lifecycle", "compact_checkpoint", "world_state", "reference_context", "rollback", "hook_lifecycle", "task_event", "agent_event",
 ]);
 const V1_KINDS = new Set<TranscriptKind>([
   "session_meta", "turn_started", "turn_completed", "turn_aborted", "message", "tool_call", "tool_result",
@@ -108,6 +119,12 @@ function validatePayload(kind: TranscriptKind, payload: Record<string, unknown>,
     if (typeof payload.cleared !== "boolean") throw invalid(line, "reference_context.cleared 无效");
   } else if (kind === "rollback") {
     if (!Number.isInteger(payload.throughOrdinal) || (payload.throughOrdinal as number) < 0) throw invalid(line, "rollback.throughOrdinal 无效");
+  } else if (kind === "hook_lifecycle") {
+    if (typeof payload.event !== "string" || typeof payload.hookId !== "string" || !["completed", "failed", "blocked", "skipped"].includes(String(payload.status)) || typeof payload.durationMs !== "number" || typeof payload.rewritten !== "boolean" || typeof payload.addedContext !== "boolean") throw invalid(line, "hook_lifecycle payload 无效");
+  } else if (kind === "task_event") {
+    if (!["create", "update", "claim", "complete", "fail", "cancel"].includes(String(payload.operation)) || !isRecord(payload.task) || typeof payload.task.id !== "string" || typeof payload.task.description !== "string") throw invalid(line, "task_event payload 无效");
+  } else if (kind === "agent_event") {
+    if (typeof payload.agentId !== "string" || !["started", "completed"].includes(String(payload.event))) throw invalid(line, "agent_event payload 无效");
   }
 }
 

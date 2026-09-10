@@ -1,0 +1,31 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+import { Observability } from "../../src/core/observability.js";
+import { asCallId, asRequestId, asSessionId, asStepId, asTurnId } from "../../src/protocol/ids.js";
+import { makeWorkspace } from "../helpers.js";
+
+test("observability persists canonical events and derived metrics", async (t) => {
+  const root = await makeWorkspace();
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, "events.sqlite");
+  const first = new Observability(100, file, { inputCostPer1k: 2, outputCostPer1k: 4 });
+  first.onEvent({ type: "turn_completed", sessionId: asSessionId("session-test"), turnId: asTurnId("turn-test"), reason: "completed" });
+  const requestId = asRequestId("request-test"); const stepId = asStepId("step-test"); const callId = asCallId("call-test");
+  first.onEvent({ type: "model_event", sessionId: asSessionId("session-test"), turnId: asTurnId("turn-test"), stepId, event: { type: "response_started", requestId } });
+  first.onEvent({ type: "model_event", sessionId: asSessionId("session-test"), turnId: asTurnId("turn-test"), stepId, event: { type: "text_delta", text: "secret response body" } });
+  first.onEvent({ type: "model_event", sessionId: asSessionId("session-test"), turnId: asTurnId("turn-test"), stepId, event: { type: "usage", requestId, usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12, cachedInputTokens: 3 } } });
+  first.onEvent({ type: "model_event", sessionId: asSessionId("session-test"), turnId: asTurnId("turn-test"), stepId, event: { type: "response_completed", finishReason: "stop" } });
+  first.onEvent({ type: "tool_use_started", toolName: "read_file", callId });
+  first.onEvent({ type: "tool_use_completed", toolName: "read_file", callId, isError: false });
+  first.close();
+  const resumed = new Observability(100, file);
+  assert.equal(resumed.events().at(0)?.type, "turn_completed");
+  assert.equal(resumed.list().at(0)?.name, "turn.completed");
+  const names = new Set(resumed.list().map((sample) => sample.name));
+  assert.ok(names.has("model.ttft_ms")); assert.ok(names.has("model.latency_ms")); assert.ok(names.has("model.cached_input_tokens")); assert.ok(names.has("tool.duration_ms"));
+  assert.equal(resumed.list().find((sample) => sample.name === "model.cost")?.value, 0.028);
+  assert.equal(JSON.stringify(resumed.events()).includes("secret response body"), false);
+  resumed.close();
+});

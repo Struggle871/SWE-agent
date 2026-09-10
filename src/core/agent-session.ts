@@ -7,7 +7,7 @@ import { TranscriptStore } from "../persistence/transcript-store.js";
 import type { CompactionResult } from "./context/compaction-types.js";
 import type { ReconstructedSession } from "../persistence/reconstruction.js";
 
-export interface AgentSessionOptions { transcriptRoot?: string }
+export interface AgentSessionOptions { transcriptRoot?: string; initialMessages?: readonly import("../types.js").Message[] }
 
 /** Compatibility facade. M4 lifecycle ownership lives in SessionCoordinator. */
 export class AgentSession {
@@ -89,6 +89,7 @@ export class AgentSession {
   get sessionId(): SessionId { return this.coordinator.id; }
   get transcriptPath(): string { return this.coordinator.transcriptPath; }
   get recovery() { return this.coordinator.recovery; }
+  get tasks() { return this.coordinator.tasks; }
 }
 
 function defaultTranscriptRoot(ctx: AgentContext): string {

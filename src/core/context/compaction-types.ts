@@ -41,6 +41,11 @@ export interface ReferenceContextPayload {
   contextLimit?: number;
   cwd?: string;
   instructionFingerprint?: string;
+  skillCatalogFingerprint?: string;
+  selectedSkillFingerprint?: string;
+  memoryFingerprint?: string;
+  configFingerprint?: string;
+  requirementsFingerprint?: string;
   toolLayoutFingerprint?: string;
   permissionFingerprint?: string;
   worldStateFingerprint?: string;

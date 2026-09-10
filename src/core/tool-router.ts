@@ -22,14 +22,18 @@ export class ToolRouter {
   ) {}
 
   async route(action: Extract<AgentAction, { type: "tool_call" }>, ctx: AgentContext, options: RouteOptions): Promise<ToolResult> {
-    const registration = ctx.registry.getRegistration(action.toolName);
-    if (!registration || (registration.spec.exposure ?? "direct") !== "direct") return errorResult(action.toolName, `未知或不可用工具: ${action.toolName}`);
+    const preHook = await ctx.hooks?.dispatch("PreToolUse", { toolName: action.toolName, input: action.toolInput }, ctx, options.signal);
+    if (preHook?.blocked) return errorResult(action.toolName, preHook.reason ?? "PreToolUse hook blocked tool");
+    const routedAction = preHook?.rewrittenInput ? { ...action, toolInput: preHook.rewrittenInput } : action;
+    const lease = ctx.registry.acquireRegistration(routedAction.toolName);
+    const registration = lease?.registration;
+    if (!registration || (registration.spec.exposure ?? "direct") !== "direct") { lease?.release(); return errorResult(routedAction.toolName, `未知或不可用工具: ${routedAction.toolName}`); }
     const spec = registration.spec;
     const toolName = qualifiedName(spec);
     const runtime = registration.runtime;
     let failurePhase: AuditRecord["phase"] = "preflight";
     try {
-      let checked = await this.preflight.run(options.callId, spec, action.toolInput, ctx);
+      let checked = await this.preflight.run(options.callId, spec, routedAction.toolInput, ctx);
       options.onEvent?.({ type: "tool_preview", preview: checked.preview });
       await ctx.auditTrail.record({ timestamp: Date.now(), callId: options.callId, toolName, phase: "preflight", decision: checked.decision, preview: checked.preview, input: checked.normalizedInput, beforeHashes: checked.fileHashes });
       if (checked.decision === "deny") return this.reject(ctx, options.callId, toolName, `安全策略拒绝执行: ${checked.preview.reasons.join("；")}`);
@@ -37,12 +41,14 @@ export class ToolRouter {
         failurePhase = "approval";
         const request: ApprovalRequest = { requestId: randomUUID(), preview: checked.preview, permissionFingerprint: checked.permissionFingerprint };
         options.onEvent?.({ type: "approval_requested", request });
+        const permissionHook = await ctx.hooks?.dispatch("PermissionRequest", { requestId: request.requestId, toolName, risk: checked.preview.risk, preview: checked.preview }, ctx, options.signal);
+        if (permissionHook?.blocked) return this.reject(ctx, options.callId, toolName, permissionHook.reason ?? "PermissionRequest hook blocked approval");
         const approval = await ctx.approvalBroker.request(request, options.signal);
         options.onEvent?.({ type: "approval_resolved", result: approval });
         await ctx.auditTrail.record({ timestamp: Date.now(), callId: options.callId, toolName, phase: "approval", approval });
         if (!approval.approved) return this.reject(ctx, options.callId, toolName, "用户或权限策略拒绝执行工具");
         failurePhase = "revalidation";
-        const revalidated = await this.preflight.run(options.callId, spec, action.toolInput, ctx);
+        const revalidated = await this.preflight.run(options.callId, spec, routedAction.toolInput, ctx);
         const unchanged = revalidated.permissionFingerprint === checked.permissionFingerprint;
         await ctx.auditTrail.record({ timestamp: Date.now(), callId: options.callId, toolName, phase: "revalidation", decision: revalidated.decision, preview: revalidated.preview, success: unchanged, beforeHashes: revalidated.fileHashes, error: unchanged ? undefined : "审批后目标、内容或权限发生变化" });
         if (!unchanged) { options.onEvent?.({ type: "tool_preview", preview: revalidated.preview }); return this.reject(ctx, options.callId, toolName, "审批后目标、文件内容或权限发生变化；旧审批已失效，请重新发起工具调用"); }
@@ -50,7 +56,7 @@ export class ToolRouter {
         checked = revalidated;
       }
       if (options.signal.aborted) return this.reject(ctx, options.callId, toolName, "工具执行已取消");
-      const sandboxAdmission = await this.assertSandbox(checked, ctx, options.callId);
+      const sandboxAdmission = await this.assertSandbox(checked, spec, ctx, options.callId);
       failurePhase = "execution";
       const result = await withAbortTimeout(
         (signal) => runtime.execute(checked.normalizedInput, ctx, { signal }),
@@ -59,19 +65,27 @@ export class ToolRouter {
       );
       const afterHashes = await collectHashes(Object.keys(checked.fileHashes), ctx);
       await ctx.auditTrail.record({ timestamp: Date.now(), callId: options.callId, toolName, phase: "execution", success: result.isError !== true, error: result.isError ? result.output : undefined, beforeHashes: checked.fileHashes, afterHashes, sandbox: sandboxAdmission ? describeSandbox(sandboxAdmission) : undefined });
-      return normalizeResult(result, toolName);
+      let normalized = normalizeResult(result, toolName);
+      const postHook = await ctx.hooks?.dispatch("PostToolUse", { toolName, input: routedAction.toolInput, output: normalized.output, isError: normalized.isError === true }, ctx, options.signal);
+      if (postHook?.blocked) return errorResult(toolName, postHook.reason ?? "PostToolUse hook blocked tool result");
+      const hookContext = [preHook?.additionalContext, postHook?.additionalContext].filter((value): value is string => !!value);
+      if (hookContext.length > 0) normalized = { ...normalized, output: `${normalized.output}\n\n[hook context]\n${hookContext.join("\n\n")}` };
+      return normalized;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await ctx.auditTrail.record({ timestamp: Date.now(), callId: options.callId, toolName, phase: failurePhase, success: false, error: message }).catch(() => undefined);
       return errorResult(toolName, `工具执行异常: ${message}`);
+    } finally {
+      lease.release();
     }
   }
 
-  private async assertSandbox(checked: ToolPreflightResult, ctx: AgentContext, callId: string): Promise<SandboxAdmission | undefined> {
-    if (checked.preview.toolName !== "run_command") return undefined;
-    const assessment = await ctx.commandAnalyzer.analyze(String(checked.normalizedInput.command ?? ""), ctx.workspaceRoot);
+  private async assertSandbox(checked: ToolPreflightResult, spec: import("../tools/types.js").ToolSpec, ctx: AgentContext, callId: string): Promise<SandboxAdmission | undefined> {
+    if (!spec.sandbox && checked.preview.toolName !== "run_command") return undefined;
+    const command = checked.preview.command ?? String(checked.normalizedInput.command ?? "");
+    const assessment = command ? await ctx.commandAnalyzer.analyze(command, ctx.workspaceRoot) : undefined;
     const provider = ctx.sandboxProvider;
-    const requirements = assessment.requires;
+    const requirements = spec.sandbox ?? assessment?.requires;
     if (!provider) throw new SandboxCapabilityError(["sandbox provider"]);
     const capabilities = provider.capabilities();
     const strictness = capabilities.enforcement === "container" ? "required" : "best_effort";
@@ -81,7 +95,7 @@ export class ToolRouter {
         profile,
         requirements,
       );
-      if (!capabilities.osEnforced && assessment.reasons.some((reason) => /动态|无法静态|命令替换|glob|变量/.test(reason))) {
+      if (!capabilities.osEnforced && assessment?.reasons.some((reason) => /动态|无法静态|命令替换|glob|变量/.test(reason))) {
         throw new SandboxCapabilityError(["OS-enforced boundary for dynamic command"]);
       }
       return admission;

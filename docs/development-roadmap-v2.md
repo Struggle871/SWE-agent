@@ -2,7 +2,7 @@
 
 > 日期：2026-08-27  
 > 基准设计：[alignment-design-v2.md](./alignment-design-v2.md)  
-> 当前状态：Phase 3 发布完成口径截至 M3.5；M4/M5 有工作区原型但仍处于规划/验收中；M6 工作区实现已通过专项验证，但不跳级标记为已发布
+> 当前状态：M0-M8 已按源码与测试完成验收；M9 的 Hooks、Plugin、动态 MCP、OAuth/PKCE 与 elicitation 主路径已闭环，独立 MCP 管理 CLI、OAuth discovery/跨进程刷新锁仍属增强项；M10 的 Memory、App Server 与首版 Observability 已闭环，跨节点认证、导出与 retention 仍属硬化项
 > 目标：把当前 demo 逐步演进为可测试、可审计、可恢复、可扩展的 TypeScript SWE Agent
 > 基线说明：第 1 节保留 2026-08-27 立项时的审计快照，不代表当前实现；当前能力以 [README.md](../README.md) 和源码测试为准，M6 以 [m6-context-checkpoint-compaction.md](./m6-context-checkpoint-compaction.md) 为准。
 
@@ -946,7 +946,7 @@ checkpoint只在backend成功且replacement校验通过后安装。Resume/Fork/r
 
 目标：让配置有来源、有约束、可解释。
 
-完整的 Codex 源码对照、当前差距、协议、M6 集成和测试矩阵见 [m7-config-agents-skills.md](./m7-config-agents-skills.md)。本节只保留实施摘要；M7 当前为“基础运行时已接入、完整能力待实现”。
+完整的 Codex 源码对照、协议、M6 集成和测试矩阵见 [m7-config-agents-skills.md](./m7-config-agents-skills.md)。Extended M7 工作区实现还包括 Skill 使用路径的真实 MCP/HTTP provider、Marketplace 安装生命周期、受约束脚本、embedding/hybrid selector、`js-tiktoken`、统一 preview/audit、并发扫描、cache 和 watcher。Plugin 动态激活属于 M9；MCP 管理平台边界见 12.2。当前 `npm run check` 已通过 132 个测试，阶段状态按源码和验收项管理。
 
 ### 10.1 配置层
 
@@ -986,14 +986,14 @@ packaged defaults
 
 ### 10.4 Skills
 
-首版只做本地 `SKILL.md`：
+Extended M7 在本地 `SKILL.md` 首路径上增加 provider 和安装扩展：
 
 - 区分常驻 developer metadata catalog、显式选中后的 user-role body 和按需 supporting resources。
 - frontmatter 校验、canonical path identity、scope、同名冲突和单项错误隔离。
 - 有界 roots/depth/entries/concurrency discovery；enablement 只接受 user/session 规则。
 - catalog 公平降级预算和 selected-body 单项/总预算都进入 M6 token accounting。
-- 只支持显式提及；supporting file/script 仍走 ToolRouter/Executor 完整安全链。
-- Plugin/MCP/provider 和隐式语义 selector 延期，不建立空壳。
+- 显式提及优先；开启配置后使用确定性 selector，supporting file/script 仍走 ToolRouter/Executor 完整安全链。
+- Plugin/Marketplace 和 MCP/executor/orchestrator provider 通过可注入 transport、trust 和授权回调工作。
 
 ### 10.5 M7 完成标准
 
@@ -1006,6 +1006,12 @@ packaged defaults
 - config/instructions/skills snapshot 纳入 M6 compHash、checkpoint、Resume/Fork 和 token budget。
 
 ## 11. M8：任务图和多 Agent
+
+Codex 源码对照、项目取舍、端到端流程及 M8-M10 验收边界见
+[m8-m10-codex-alignment.md](./m8-m10-codex-alignment.md)。当前工作区已实现并验证 M8：持久化 DAG、
+`task_create/get/list/update`、依赖 ready/领取/重试/取消传播、本地 child session、独立 transcript/shell/workingMemory、
+持久 mailbox、`spawn/list/wait/send_message`、跨进程 revision/claim lock、`none/all/N turns` fork mode、父取消传播、
+managed worktree 和写冲突检测。崩溃时未知在途 child 采用明确失败且不重放副作用的恢复策略，满足 M8 完成标准。
 
 预计：7 到 10 个开发日。
 
@@ -1093,6 +1099,10 @@ packaged defaults
 
 ### 12.2 MCP
 
+当前 MCP 已补齐 bounded pagination、重复 cursor/条目/总时限防护、listChanged、prompts/resource templates/
+subscriptions、client-credentials credential lifecycle、health/reconnect，以及经 App Server 审批并持久化的动态 add/remove。
+authorization-code OAuth/PKCE 与 elicitation 已通过 App Server 审批链路接入；独立管理 CLI、OAuth discovery/跨进程刷新锁仍未完成，不得把 transport 主路径的存在写成所有 MCP 平台增强均已完成。
+
 先实现 stdio transport，再实现 HTTP/SSE。连接状态：
 
 ```text
@@ -1108,6 +1118,10 @@ disconnected -> connecting -> ready -> degraded -> closed
 - 连接和调用都有 timeout/cancel。
 
 ### 12.3 插件
+
+Marketplace 安装生命周期与 Plugin runtime activation 已接通。manifest 中 Skills/tools/hooks/MCP servers 会先完整校验，
+再切换 ToolRegistry generation；enable/disable/upgrade 会动态更新 live registry。在途调用持有旧 runtime lease，失败
+激活不改变 live generation，App Server 管理失败会恢复 registry 与磁盘版本。
 
 插件只做声明式组合：
 

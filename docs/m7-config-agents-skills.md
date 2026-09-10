@@ -1,12 +1,12 @@
 # M7 设计：配置、AGENTS 与 Skills
 
-> 状态（2026-09-08）：已接入基础 contextual-fragment runtime（canonical fragment、AGENTS bounded read、Skills catalog/显式 body、world-state fingerprint），但完整配置层 provenance、managed requirements、trust gating、enablement 和安全 filesystem adapter 尚未实现。本文件仍是 M7 的完整实现契约，不代表 M7 已完成。
+> 状态（2026-09-09）：Extended M7 工作区实现已通过 `npm run check`（102 tests），但按项目里程碑顺序仍不标记为正式发布完成。真实 stdio MCP、Streamable HTTP MCP client、executor/orchestrator HTTP provider、Marketplace 生命周期、embedding/hybrid selector、`js-tiktoken` 和文件级 Skill 索引增量失效均已接入主路径。生产签名信任根、外部服务 SLA 和跨进程文件事件协调仍由部署层负责。
 > Codex 源码基线：`tmp/openai-codex-source`，commit `2c4a95736bea64256a50f7b8506bd33c181cc85a`（2026-08-27）。
 > 证据边界：本地 Codex 源码是本文件中“Codex 源码事实”的依据。官方配置、AGENTS 和 Skills 页面在当前环境返回 HTTP 403，本轮没有取得网页正文，因此未用不可访问的页面补写事实。上游仓库的 `docs/config.md`、`docs/agents_md.md` 和 `docs/skills.md` 也只链接这些页面。
 
 ## 1. 结论
 
-当前项目已有简化的 TOML、环境变量和项目指令加载，但不能视为 M7 实现。主要原因不是缺少几个配置字段，而是还没有形成以下闭环：
+当前项目已经形成 M7 首轮闭环，但还不能视为发布完成。已落地的运行路径是：
 
 ```text
 typed config layers + per-key provenance
@@ -18,7 +18,15 @@ typed config layers + per-key provenance
   -> Resume/Fork deterministic replay
 ```
 
-M7 首版只实现本地 host 配置、AGENTS 和 Skills。Plugin、MCP skill provider、orchestrator/executor provider、远程安装、语义 selector 和自动脚本执行均延期，不能提前建立没有测试契约的空壳。
+Extended M7 的开发实现覆盖 Plugin/Marketplace、真实 MCP 与 HTTP provider、受约束脚本执行、显式/词法/embedding/hybrid 选择、真实 BPE token 计数、统一审计和失效 watcher。远程 provider 地址、认证材料与 embedding endpoint 来自受信配置，项目级配置不能自行启动这些外部能力。
+
+本轮源码与测试映射：
+
+- `src/config/toml.ts` 与 `src/config/layered-config.ts`：TOML 1.1 parser、root-to-cwd layers、strict schema、explicit env patch、provenance、`configExplain()`、trust、requirements 与 canonical source reads；不可信 project layer 不读取正文。
+- `src/config/agents-md.ts`：候选优先级、32 KiB UTF-8 预算、canonical identity、snapshot 和 replacement/removal fragments。
+- `src/config/skills.ts`：bounded roots、标准 YAML frontmatter、可选 `agents/openai.yaml` fail-open/policy、canonical identity、冲突、enablement、catalog/body 双预算和 resource path containment。
+- `src/config/context-filesystem.ts`：AGENTS/Skills 读取的 canonical read-root 边界与可注入测试接口。
+- `src/config/context-loader.ts` 与 `src/core/context/world-state.ts`：每 turn snapshot refresh、world/reference/compHash 以及 Resume/Fork replay identity。
 
 三类输入必须保持不同语义：
 
@@ -66,7 +74,7 @@ M7 首版只实现本地 host 配置、AGENTS 和 Skills。Plugin、MCP skill pr
 2. 显式选择支持结构化 path/input、`$skill-name` 和带 skill path 的 Markdown mention。同名 skill 有歧义时不能靠 plain name 猜测，显式 locator 可以精确选择。
 3. `SKILL.md` 必须有 YAML frontmatter 和 description；name 可缺省为目录名，最长 64 字符。单行字段会规范化空白。
 4. 可选 `agents/openai.yaml` 描述 interface、tool dependencies、`policy.allow_implicit_invocation` 和 products。可选 metadata 解析失败采用 fail-open，不应使有效 `SKILL.md` 消失。
-5. host roots 有 repo、user、system、admin scope，另有 plugin/executor/orchestrator provider。本项目 M7 只实现 host/local roots。
+5. host roots 有 repo、user、system、admin scope，另有 plugin/executor/orchestrator provider。本项目 Extended M7 开发实现提供这些 provider 的统一适配接口，发布验收仍待后续里程碑。
 6. 上游扫描有明确边界：递归深度最多 6，每 root 最多 2,000 个目录和 20,000 个 entries，并限制 root 与 skill load 并发。隐藏目录会跳过；canonical path 是 identity，roots 先排序再按 canonical path 去重。
 7. 同名 skill 不能简单相互覆盖。catalog 必须保留稳定 locator 和冲突状态。
 8. `skills.config` 可按 canonical path 或 name 启停，后规则覆盖前规则。Codex 只采纳 user/session 层的 enablement rules，防止项目配置自行提升 skill 状态。
@@ -76,7 +84,7 @@ M7 首版只实现本地 host 配置、AGENTS 和 Skills。Plugin、MCP skill pr
 12. supporting files 不递归预加载，模型依照 `SKILL.md` 的路由说明按需读取。读取文件或执行 `scripts/` 仍必须走 ToolRouter、Executor、WorkspacePolicy、权限、sandbox 和审计。
 13. 无效 skill 产生隔离的 error/warning，不阻止整个 session。缓存/快照需包含 cwd、roots、配置规则和文件状态，并支持明确失效或强制 reload。
 14. 上游普通 host selected body 当前没有统一的 8 KiB 限制；8 KiB 出现在部分 extension resource 路径。本项目应自行定义 selected-body 单项与总预算，并明确这是本项目策略。
-15. 当前稳定路径主要自动注入显式 mentions；动态 selector 仍有实验路径。不能把 catalog description 推断成已经稳定实现的自动语义路由。
+15. 显式 mention 是默认路径；开启 `implicit_selection` 后可明确选择 lexical、embedding 或 hybrid。embedding 请求有批处理、超时、重试、取消、向量校验和持久化候选缓存，失败会产生诊断，不会静默伪装成语义选择成功。
 
 ## 3. 当前实现差距
 
@@ -101,7 +109,7 @@ M7 首版只实现本地 host 配置、AGENTS 和 Skills。Plugin、MCP skill pr
 
 ### 3.3 Skills 差距
 
-当前项目没有 M7 Skills runtime。路线图只有概念条目，尚未定义 roots、scope、canonical identity、同名冲突、enablement 来源、catalog/body 双预算、错误隔离、缓存失效和 M6 replay 契约。
+实现前审计时，项目没有 M7 Skills runtime；当前已定义并实现 roots、scope、canonical identity、同名冲突、enablement 来源、catalog/body 双预算、错误隔离、缓存失效和 M6 replay 契约。
 
 ## 4. M7 范围与模块边界
 
@@ -340,7 +348,7 @@ catalog 是 developer contextual fragment，只含安全转义后的 name、desc
 2. 在剩余预算中公平轮转分配 description，而不是让前几个 skill 占满。
 3. 最小行也放不下时才按稳定顺序省略尾部，并返回 omitted count warning。
 
-M7 只支持显式 mention。`$name` 仅在唯一匹配时选择；结构化 locator/path 可以精确选择。隐式语义匹配只记录为延期项，`allowImplicitInvocation` 不产生自动执行权限。
+显式 mention 仍是最稳定路径；`$name` 仅在唯一匹配时选择，结构化 locator/path 可以精确选择。启用 `skills.implicit_selection` 后，确定性 selector 才会按 query 选择允许隐式调用的 Skill；`allowImplicitInvocation` 不产生自动执行权限。
 
 选中的正文渲染为独立 `role: user` `<skill>...</skill>` contextual fragment。项目策略设置两类上限：
 
@@ -401,7 +409,7 @@ compHash
 - `.git`、`.swe-agent`、`.claude`、`.codex`、`.env` 等 bypass-immune 写保护不因 skill 指令或 approval 改变。
 - AGENTS 和 Skills 只能影响模型上下文，不能改变 `PermissionPolicy`、`ApprovalBroker`、`ToolPreflight` 或 sandbox enforcement。
 - 诊断、provenance 和 audit 不记录 API key、完整环境变量、credential、完整 AGENTS/skill body 或 secret config value；只记录 path、hash、长度和脱敏字段。
-- 配置/skill watcher 只能使 snapshot 失效；不得在 active request 中途修改不可变 request snapshot。变化在下一个 context preparation 边界生效。
+- 配置/skill watcher 更新文件级 Skill 索引并使聚合 snapshot 失效；不得在 active request 中途修改不可变 request snapshot。变化在下一个 context preparation 边界生效。无法判定具体目录的 rename/overflow 事件才回退到 root 重扫。
 
 ## 10. 实现顺序
 
@@ -459,13 +467,12 @@ compHash
 - config、instructions 和 skills 纳入 M6 world state、reference context、compHash、token accounting 及 checkpoint replay。
 - `npm run check` 通过，README 的能力描述与实际运行路径一致。
 
-## 13. 延期项
+## 13. 明确边界
 
-- Plugin manifest、安装、marketplace 和第三方 provider。
-- MCP/executor/orchestrator skill roots 与依赖解析。
-- 自动安装或更新 skill、签名和远程信任模型。
-- 稳定的隐式语义 selector、模型 shadow experiment 和自动脚本执行。
-- 文件 watcher 的平台优化；首版可用显式 snapshot invalidation/mtime-hash 检查。
-- 完整 Codex 多环境 host service；首版只实现当前 workspace environment，但数据模型保留 environment id。
-
-延期项不得以空目录、空接口或“已支持”文案提前进入实现状态。
+- Marketplace 默认要求 manifest content hash，并支持 trust 与 authorizeInstall 回调；本项目不内置第三方签名根或账号体系。
+- MCP provider 使用 `@modelcontextprotocol/sdk` 的 stdio/Streamable HTTP transport，并验证了真实子进程握手、resources/read 和 tool call；executor/orchestrator 通过受信配置的 HTTP provider 接入。
+- Skill selector 包含可复现 lexical 基线和 OpenAI-compatible embedding/hybrid 实现；embedding endpoint 未配置或失败时输出结构化诊断。
+- 主运行路径使用 `js-tiktoken`；已知模型匹配其 encoding，未知 provider 模型明确报告 fallback encoding，而不是把字符估算冒充真实 tokenizer。
+- Marketplace CLI/API 支持 index search、semver、安装、升级、启用、禁用和卸载；安装使用 staging、内容 hash、运行产品/权限校验和失败回滚。第三方签名信任根仍需部署方配置。
+- `openai.yaml` 的 products、tool/MCP dependencies 会影响资格；脚本必须解析为 Skill 根内的真实 `.js/.mjs/.cjs` 文件，固定 cwd 后再进入 ToolRouter 的预览、审批、复检、sandbox 和 audit 链。
+- watcher 先更新受影响 Skill 目录的索引条目，再使聚合缓存失效；下一次 context refresh 才生效，不修改活动请求的冻结快照。

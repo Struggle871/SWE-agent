@@ -1,6 +1,6 @@
 # Minimal SWE Agent
 
-一个基于 TypeScript 的命令行 SWE Agent 原型。
+一个基于 TypeScript 的、可恢复且可审计的单 Agent SWE 工程。项目面向求职与工程能力展示，不以 Demo 级接口骨架作为完成标准。
 
 ## 快速开始
 
@@ -26,6 +26,20 @@ node dist/index.js --resume <sessionId> "继续任务"
 node dist/index.js --fork <sessionId> --at <ordinal> "从该历史分支继续"
 ```
 
+Skills/插件运维入口：
+
+```powershell
+node dist/index.js skills list
+node dist/index.js skills search <query>
+node dist/index.js skills install <manifest-url>
+node dist/index.js skills upgrade <plugin-id> [semver-range]
+node dist/index.js skills enable <plugin-id>
+node dist/index.js skills disable <plugin-id>
+node dist/index.js skills uninstall <plugin-id> [version]
+```
+
+远程 Marketplace、embedding、MCP 和 executor/orchestrator provider 只能由非 project 配置层声明；CLI 操作会写脱敏后的 preflight/execution audit。
+
 使用 FakeModel 演示：
 
 ```powershell
@@ -35,7 +49,7 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 
 ## 当前状态
 
-当前版本为 v0.4 单 Agent 原型：
+当前工作区是 Phase 3 持续开发版：
 
 - Phase 1：任务规划、ReAct/JSON 输出解析、流式模型输出、文件/搜索/终端工具，已完成原型。
 - Phase 2：Token 估算、工具结果落盘、上下文压缩、分层配置和项目记忆注入，已完成原型。
@@ -47,11 +61,13 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 - Phase 3 安全闭环 S0/S1：Sandbox capability 已区分 best-effort 与实际强制等级，`SandboxManager` 已接入命令准入，执行请求携带规范化 `SandboxProfile`。
 - Phase 3 Windows strict S2：Windows 默认使用 `WindowsDockerSandboxProvider`，固定启用 `network=none`、只挂载工作区、只读 rootfs、丢弃 capabilities、禁止提权和容器清理；Docker 不可用时不会静默退回裸 Shell。`SWE_SANDBOX_MODE=best-effort` 才启用本地 adapter。
 - macOS/Linux OS provider：延期，当前非 Windows CLI 使用不可用 provider 并拒绝命令执行；不会添加未实现的跨平台空壳。
-- Phase 3 M4：工作区已有 SessionCoordinator/TurnRunner、输入优先级队列、单 active turn、steer 和取消传播原型，但按当前项目阶段口径仍属于规划/验收中，不能标记为已实现。
-- Phase 3 M5：工作区已有 JSONL Transcript、Resume、copied Fork、reconstruction 和轻量索引原型，但尚未按里程碑标记完成；SQLite、reference/paginated fork、archive/revert、持久化队列/mailbox、L3 trace 等仍按后续阶段规划。设计边界见 [`docs/m5-transcript-resume-fork.md`](docs/m5-transcript-resume-fork.md)。
-- Phase 3 M6：工作区已落地持久化 context checkpoint、pre/mid/manual compaction、local/remote/remote-v2/new-context backend、window lineage、world/reference baseline、replacement-history Resume/Fork/rollback replay 和 durable-before-live 故障边界，并通过 M6 专项测试。由于 M4/M5 尚未按路线图顺序完成发布验收，这里记录为“实现已验证”，不改写整体里程碑发布状态。完整约束与实现映射见 [`docs/m6-context-checkpoint-compaction.md`](docs/m6-context-checkpoint-compaction.md)。
-- Phase 3 M7：已接入 contextual fragments 的运行时基础（AGENTS/Skills catalog、显式 skill body、world-state fingerprint），但完整配置层 provenance、managed requirements、trust gating 和 Skills enablement 仍未完成，不能标记为 M7 完成。设计见 [`docs/m7-config-agents-skills.md`](docs/m7-config-agents-skills.md)。
-- M8 及以后：任务图、多 Agent、Hooks、MCP 和可观测性，规划中。
+- Phase 3 M4：SessionCoordinator/TurnRunner、输入优先级、单 active turn、steer、interrupt/shutdown 和模型/工具取消传播已接入公开 Session 路径并通过集成测试。
+- Phase 3 M5：JSONL Transcript 是 canonical source，Resume、copied Fork、reconstruction、尾部修复、unknown outcome 和 rollback 已通过恢复测试。reference/paginated fork 是大历史优化，不在 M5 首版完成口径内。设计边界见 [`docs/m5-transcript-resume-fork.md`](docs/m5-transcript-resume-fork.md)。
+- Phase 3 M6：持久化 context checkpoint、pre/mid/manual compaction、local/remote/remote-v2/new-context backend、window lineage、world/reference baseline、replacement-history Resume/Fork/rollback replay 和 durable-before-live 故障边界已通过专项测试。完整约束见 [`docs/m6-context-checkpoint-compaction.md`](docs/m6-context-checkpoint-compaction.md)。
+- Phase 3 M7：配置 provenance/trust/requirements、AGENTS 边界与预算、Skills 发现/选择/按需正文、真实 tokenizer、Marketplace 生命周期、受约束脚本、provider、增量 watcher 和统一安全入口已实现并验证。设计边界见 [`docs/m7-config-agents-skills.md`](docs/m7-config-agents-skills.md)。
+- Phase 3 M8：持久化任务 DAG、跨进程 revision/claim lock、依赖调度、重试/取消传播、本地 child Agent、`none/all/N turns` 历史继承、独立 transcript/shell/workingMemory、持久 mailbox、managed Git worktree 和写冲突检测已完成。进程崩溃时未知在途 child 明确标记失败，不自动重放可能有副作用的工具。
+- Phase 3 M9（主路径完成）：Hooks 的 block/rewrite/context、timeout/cancel/trust/audit/lifecycle 已接入 Session/Tool/Compaction/Subagent 路径；Plugin tools/hooks/MCP generation 可原子切换，在途 runtime 通过租约排空，管理失败会恢复 registry 与磁盘版本。MCP 支持官方 SDK stdio/Streamable HTTP、分页与重连保护、resources/prompts/templates/subscription、client-credentials 与 authorization-code OAuth/PKCE、elicitation，以及经 App Server 审批的持久化动态 add/remove。独立 MCP 管理 CLI、OAuth discovery 和跨进程刷新锁仍是后续增强。
+- Phase 3 M10（首版完成）：SQLite Memory、候选提取/合并、token-bounded retrieval 与 context identity 已接入；SQLite 可观测投影记录 canonical event，并派生 turn/tool/compaction、TTFT、provider latency、token/cache、cost、sandbox violation、approval 和 subagent 指标；App Server 提供 JSON-RPC session/turn/approval/transcript/task/tool/skill/MCP/plugin API、Bearer 认证、SSE cursor replay/gap 和断线后继续运行。跨节点认证、指标导出和更完整的 retention policy 属于后续硬化。
 
 ## 功能更新日志
 
@@ -104,6 +120,9 @@ node dist/index.js "请查看当前目录结构，然后给出最终结论"
 | `edit_file` | 将唯一 `old_string` 精确替换为 `new_string` |
 | `run_command` | 在沙箱 provider 控制的执行环境中运行命令并返回输出和退出码 |
 | `read_terminal_output` | 读取持久终端中尚未消费的输出 |
+| `task_create/get/list/update` | 创建、查询和推进持久化任务 DAG |
+| `spawn_agent/list_agents/wait_agent/send_message` | 管理隔离的本地 child Agent 与 mailbox |
+| `memory_put/search/delete/extract/consolidate/candidates` | 管理结构化长期记忆与候选合并 |
 
 新增工具必须在 `src/tools/` 实现，并通过 `ToolRegistry` 注册。
 
@@ -205,7 +224,15 @@ COMPACTION_TIMEOUT_MS=60000
 COMPACTION_MAX_RETRIES=2
 ```
 
-当前已实现的原型配置优先级为：内置默认值、用户级 `~/.swe-agent/config.toml`、cwd 项目级 `.swe-agent/config.toml`、`.env`/环境变量/调用方覆盖，后者优先级最高。当前 local 层会重新带入默认值，可能覆盖 user/project；完整 TOML、provenance、managed requirements、project trust 与 session flags 尚待 M7 修复，不能把本段当作目标架构。目标设计见 [`docs/m7-config-agents-skills.md`](docs/m7-config-agents-skills.md)。
+当前配置优先级为：内置默认值、用户级 `~/.swe-agent/config.toml`、project root 到 cwd 的逐级 `.swe-agent/config.toml`、显式环境变量 patch、调用方 session overrides，后者优先级最高。未设置的环境变量不会覆盖低层值；每个叶字段保留来源，project trust 在读取项目 AGENTS/Skills 前决定，`.swe-agent/requirements.toml` 作为独立约束平面拒绝更高层放宽 sandbox/network。
+
+查看某个最终值、覆盖链、disabled layer 和约束（secret 会显示为 `<redacted>`）：
+
+```powershell
+npm start -- --config-explain model.model
+```
+
+TOML 语法由 `smol-toml` 的 TOML 1.1 parser 处理，随后再执行本项目的 strict runtime schema 校验。详见 [`docs/m7-config-agents-skills.md`](docs/m7-config-agents-skills.md)。
 
 ## 测试与构建
 
@@ -221,7 +248,7 @@ npm run build
 npm run check
 ```
 
-当前基线为 54 项测试全部通过。
+当前基线为 132 项测试全部通过。
 
 ## 目录结构
 

@@ -1,0 +1,16 @@
+---
+description: Enforce production-quality, end-to-end implementation standards for this interview project
+alwaysApply: true
+---
+
+# Production-Quality Project Standard
+
+- This repository is a job-interview engineering project, not a demo or architecture showcase.
+- Prioritize a working end-to-end capability over copying Codex module names, interfaces, or extension points.
+- Do not call a feature implemented when it only has interfaces, adapters, configuration fields, mocks, placeholders, or documentation.
+- A completed feature needs a real entry point, core behavior, runtime wiring, failure handling, lifecycle or persistence behavior where applicable, and tests that exercise the public path.
+- Before substantial implementation, define the user-visible flow and acceptance criteria. Verify the complete flow after implementation.
+- FakeModel and fake transports prove contracts only. They do not prove real model streaming, usage, retries, MCP connectivity, marketplace installation, tokenizer accuracy, watcher behavior, or sandbox enforcement.
+- Add abstractions only when required by current behavior or more than one real implementation. Do not mirror upstream architecture without a project-specific reason.
+- When external credentials, services, or platform facilities prevent completion, report the exact unverified boundary and mark the feature incomplete instead of substituting a fallback and declaring success.
+- Documentation must distinguish implemented behavior, infrastructure, experimental behavior, and planned work.

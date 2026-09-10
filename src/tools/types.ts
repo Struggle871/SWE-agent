@@ -21,6 +21,8 @@ export interface ToolSpec {
   exposure?: ToolExposure;
   parallelizable?: boolean;
   sandbox?: SandboxRequirements;
+  /** Fixed command owned by a trusted adapter; model input never changes it. */
+  runtimeCommand?: string;
 }
 
 export interface RuntimeExecuteOptions {

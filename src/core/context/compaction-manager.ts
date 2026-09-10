@@ -20,7 +20,7 @@ import {
   estimateModelMessageTokens, estimateModelRequestInputTokens, fingerprint, requestFingerprint,
 } from "./token-accounting.js";
 import { estimateTextTokens } from "./token-estimator.js";
-import { buildWorldState, referenceContext, renderWorldState, type WorldStateInput } from "./world-state.js";
+import { buildWorldState, contextCompatibilityFingerprint, referenceContext, renderWorldState, type WorldStateInput } from "./world-state.js";
 
 const DEFAULT_COMPACTION_PROMPT = [
   "Create a concise but complete handoff checkpoint for another coding agent.",
@@ -206,12 +206,7 @@ export class CompactionManager {
     }
 
     this.options.context.installCheckpoint(checkpoint, checkpointRecord.ordinal);
-    const compHash = fingerprint({
-      model: this.options.ctx.config.model.model,
-      instructions: this.options.ctx.contextualFragments?.map((fragment) => fragment.hash).join(":") ?? this.options.ctx.agentMemories ?? "",
-      tools: this.options.ctx.registry.visibleSpecs(),
-      permissions: this.options.ctx.permissionPolicy.fingerprint(),
-    });
+    const compHash = contextCompatibilityFingerprint(worldInput);
     const reference = referenceContext(world, worldInput, compHash);
     try {
       await this.options.persist("world_state", world, compactContext(input, true));

@@ -32,11 +32,11 @@ export type AgentEvent =
   | { type: "turn_aborted"; sessionId: import("../protocol/ids.js").SessionId; turnId: import("../protocol/ids.js").TurnId; reason: string }
   | { type: "stream_start" }
   | { type: "stream_delta"; delta: string }
-  | { type: "model_event"; event: import("../protocol/model-events.js").ModelEvent }
+  | { type: "model_event"; event: import("../protocol/model-events.js").ModelEvent; sessionId?: import("../protocol/ids.js").SessionId; turnId?: import("../protocol/ids.js").TurnId; stepId?: import("../protocol/ids.js").StepId }
   | { type: "response_item"; sessionId: import("../protocol/ids.js").SessionId; turnId?: import("../protocol/ids.js").TurnId; stepId?: import("../protocol/ids.js").StepId; item: import("../protocol/items.js").ResponseItemEnvelope }
   | { type: "assistant_message"; message: import("../types.js").Message }
   | { type: "tool_use_started"; toolName: string; callId: string }
-  | { type: "tool_use_completed"; toolName: string; isError: boolean }
+  | { type: "tool_use_completed"; toolName: string; callId: string; isError: boolean }
   | { type: "tool_preview"; preview: import("../tools/preview.js").ToolExecutionPreview }
   | { type: "approval_requested"; request: import("../security/approval-broker.js").ApprovalRequest }
   | { type: "approval_resolved"; result: import("../security/approval-broker.js").ApprovalResult }
@@ -53,7 +53,10 @@ export type AgentEvent =
   | { type: "api_error"; error: Error; recoverable: boolean }
   | { type: "final_answer"; answer: string }
   | { type: "max_steps_reached" }
-  | { type: "max_turns_reached" };
+  | { type: "max_turns_reached" }
+  | { type: "subagent_started"; agentId: string; parentSessionId?: string; prompt: string }
+  | { type: "subagent_event"; agentId: string; event: AgentEvent }
+  | { type: "subagent_completed"; agentId: string; status: "completed" | "failed" | "cancelled"; result?: string; error?: string };
 
 // 每次继续推进 turn 的原因。M4 开始由 runStep / TurnRunner 实际产生。
 export type ContinueReason =

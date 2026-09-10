@@ -42,12 +42,12 @@ export class ToolPreflight {
       const after = buildWriteResult(tool.name, normalizedInput, before);
       diff = createUnifiedDiff(path.relative(target.root, target.canonicalPath), before ?? "", after);
       summary = `${tool.name}: ${target.canonicalPath}`;
-    } else if (tool.name === "run_command") {
-      command = String(normalizedInput.command ?? "");
+    } else if (tool.name === "run_command" || tool.runtimeCommand) {
+      command = tool.runtimeCommand ?? String(normalizedInput.command ?? "");
       commandAssessment = await ctx.commandAnalyzer.analyze(command, ctx.workspaceRoot);
       risk = commandAssessment.risk;
       affectedPaths.push(...(commandAssessment.affectedPaths ?? []));
-      summary = `run_command: ${command}`;
+      summary = `${qualifiedName(tool)}: ${command}`;
     } else if (tool.name === "read_terminal_output") {
       risk = "read";
       summary = "读取终端缓冲区";

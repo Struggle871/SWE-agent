@@ -102,7 +102,7 @@ export async function runStep(opts: StepOptions): Promise<StepResult> {
     onEvent?.({ type: "tool_use_started", toolName: withId.toolName, callId });
     let result = await executor.execute(withId, ctx, { callId, onEvent, signal: opts.signal });
     result = await opts.onToolCallCompleted?.({ callId, result }) ?? result;
-    onEvent?.({ type: "tool_use_completed", toolName: withId.toolName, isError: result.isError === true });
+    onEvent?.({ type: "tool_use_completed", toolName: withId.toolName, callId, isError: result.isError === true });
     return { action: withId, result };
   };
   const completed: Array<{ action: Extract<AgentAction, { type: "tool_call" }>; result: ToolResult }> = [];

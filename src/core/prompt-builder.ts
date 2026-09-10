@@ -54,7 +54,7 @@ export class PromptBuilder {
       sections.splice(7, 0, "每一步只能调用一个工具。", "");
     }
 
-    // 项目记忆（CLAUDE.md / AGENTS.md，对齐 Claude Code / Codex 的注入顺序）
+    // Compatibility path for pre-M7 JSON/ReAct sessions. Native requests use contextual fragments.
     if (!nativeToolCalls && agentMemories && agentMemories.trim()) {
       sections.push("", "## 项目记忆", agentMemories.trim());
     }

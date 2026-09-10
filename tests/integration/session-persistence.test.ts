@@ -5,6 +5,7 @@ import test from "node:test";
 import { AgentSession } from "../../src/core/agent-session.js";
 import { readRollout } from "../../src/persistence/rollout-reader.js";
 import { cleanupContext, makeContext, makeWorkspace } from "../helpers.js";
+import type { ReferenceContextPayload } from "../../src/core/context/compaction-types.js";
 
 test("multiple runs persist one canonical transcript and resume it", async (t) => {
   const ctx = await makeContext(await makeWorkspace());
@@ -57,4 +58,44 @@ test("copied fork preserves lineage and never mutates the parent transcript", as
   const childRecords = (await readRollout(fork.transcriptPath)).records;
   assert.ok(childRecords.some((record) => record.kind === "fork_created"));
   assert.ok(childRecords.some((record) => record.inheritedFrom?.sessionId === parentId));
+});
+
+test("M7 context identities survive resume and fork, then refresh on the next turn", async (t) => {
+  const root = await makeWorkspace();
+  const ctx = await makeContext(root);
+  t.after(() => cleanupContext(ctx));
+  await fs.mkdir(path.join(root, ".git"));
+  await fs.writeFile(path.join(root, "AGENTS.md"), "old instruction", "utf8");
+  const skillDir = path.join(root, ".agents", "skills", "demo");
+  await fs.mkdir(skillDir, { recursive: true });
+  await fs.writeFile(path.join(skillDir, "SKILL.md"), "---\nname: demo\ndescription: demo skill\n---\nselected body", "utf8");
+  const transcriptRoot = path.join(root, "state");
+  const session = new AgentSession(ctx, undefined, { transcriptRoot });
+  await session.run("$demo first request");
+  const sessionId = session.sessionId;
+  const transcriptPath = session.transcriptPath;
+  await session.close();
+
+  const firstRecords = (await readRollout(transcriptPath)).records;
+  const firstReference = firstRecords.filter((record) => record.kind === "reference_context").at(-1)?.payload as ReferenceContextPayload;
+  assert.ok(firstReference.instructionFingerprint);
+  assert.ok(firstReference.skillCatalogFingerprint);
+  assert.ok(firstReference.selectedSkillFingerprint);
+
+  await fs.writeFile(path.join(root, "AGENTS.md"), "new instruction", "utf8");
+  const resumed = await AgentSession.resume(ctx, sessionId, undefined, { transcriptRoot });
+  assert.equal(resumed.recovery?.referenceContext?.selectedSkillFingerprint, firstReference.selectedSkillFingerprint);
+  await resumed.run("second request");
+  await resumed.close();
+  const resumedRecords = (await readRollout(transcriptPath)).records;
+  const latestReference = resumedRecords.filter((record) => record.kind === "reference_context").at(-1)?.payload as ReferenceContextPayload;
+  assert.notEqual(latestReference.instructionFingerprint, firstReference.instructionFingerprint);
+  assert.notEqual(latestReference.selectedSkillFingerprint, firstReference.selectedSkillFingerprint);
+
+  const boundary = resumedRecords.at(-1)?.ordinal;
+  assert.notEqual(boundary, undefined);
+  const fork = await AgentSession.fork(ctx, sessionId, { atOrdinal: boundary }, undefined, { transcriptRoot });
+  assert.equal(fork.recovery?.referenceContext?.instructionFingerprint, latestReference.instructionFingerprint);
+  assert.equal(fork.recovery?.referenceContext?.selectedSkillFingerprint, latestReference.selectedSkillFingerprint);
+  await fork.close();
 });
